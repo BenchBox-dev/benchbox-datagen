@@ -449,6 +449,7 @@ struct WebPageOld {
     creation_date: i64,
     access_date: i64,
     autogen: i32,
+    url: String,
     link_count: i32,
     image_count: i32,
     max_ad_count: i32,
@@ -491,7 +492,9 @@ fn write_web_page(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
         }
         let mut autogen = i32::from(ctx.rng.int(WP_AUTOGEN_FLAG, 0, 99) < WP_AUTOGEN_PCT);
         flags.keep(&mut autogen, &mut old.autogen);
-        flags.skip(2);
+        flags.skip(1);
+        let mut url = "http://www.foo.com".to_string();
+        flags.keep(&mut url, &mut old.url);
         let page_type =
             WebPageUseDistribution::pick_random_web_page_use_type(ctx.rng.stream(WP_TYPE));
         flags.skip(1);
@@ -521,7 +524,7 @@ fn write_web_page(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
             o.flag(autogen != 0);
         });
         nulls.put(&mut out, WP_URL, |o| {
-            o.text("http://www.foo.com");
+            o.text(&url);
         });
         nulls.put(&mut out, WP_TYPE, |o| {
             o.text(&page_type);
