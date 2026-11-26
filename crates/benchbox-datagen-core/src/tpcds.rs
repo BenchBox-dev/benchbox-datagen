@@ -151,13 +151,36 @@ pub(crate) fn id_count(name: &str, scale_factor: f64) -> u64 {
     }
 }
 
+fn split_work(total_rows: u64, part: i32, parts: i32) -> (u64, u64) {
+    if total_rows < SPLIT_THRESHOLD_ROWS {
+        return if part == 1 { (1, total_rows) } else { (1, 0) };
+    }
+    let (part, parts) = (part as u64, parts as u64);
+    let rowset = total_rows / parts;
+    let extra = total_rows % parts;
+    let mut first = 1 + (part - 1) * rowset;
+    if extra > 0 && part > 1 {
+        first += (part - 1).min(extra);
+    }
+    let count = if extra > 0 && part <= extra {
+        rowset + 1
+    } else {
+        rowset
+    };
+    (first, count)
+}
+
 pub(crate) fn part_range(
     name: &str,
     scale_factor: f64,
     part: i32,
     parts: i32,
 ) -> RangeInclusive<u64> {
-    chunk_session(scale_factor, part, parts).get_source_row_range(table(name))
+    if scale_factor >= FULL_MODEL_SCALE_FACTOR {
+        return chunk_session(scale_factor, part, parts).get_source_row_range(table(name));
+    }
+    let (first, count) = split_work(source_rows(name, scale_factor), part, parts);
+    first..=first + count - 1
 }
 
 pub(crate) fn splittable(name: &str, scale_factor: f64) -> bool {
@@ -320,3 +343,29 @@ dispatch!(
     ("web_sales", WebSalesRowGenerator, WebSalesArrow),
     ("web_site", WebSiteRowGenerator, WebSiteArrow),
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parts_cover_the_scale_model_rows_at_every_scale() {
+        for scale_factor in [0.01, 0.5, 0.999, 1.0] {
+            for name in TABLES {
+                let total = source_rows(name, scale_factor);
+                for parts in [1, 3, 8] {
+                    let mut next = 1;
+                    for part in 1..=parts {
+                        let range = part_range(name, scale_factor, part, parts);
+                        if range.is_empty() {
+                            continue;
+                        }
+                        assert_eq!(*range.start(), next, "{name} {scale_factor} {part}/{parts}");
+                        next = range.end() + 1;
+                    }
+                    assert_eq!(next, total + 1, "{name} {scale_factor} {parts}");
+                }
+            }
+        }
+    }
+}
