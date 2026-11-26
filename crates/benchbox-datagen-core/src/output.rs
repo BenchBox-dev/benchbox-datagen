@@ -61,6 +61,7 @@ pub struct FileStats {
 
 const MAX_BUFFERED_THREADS: usize = 8;
 const MAX_WORKERS: usize = 16;
+const MAX_SYNTHETIC_BUFFERED: usize = 3;
 
 fn io_error(path: &Path, error: impl Display) -> Error {
     Error::Write(format!("{}: {error}", path.display()))
@@ -282,7 +283,8 @@ impl TableJob<'_> {
         let path = file_path(self.dir, table, None, self.format);
         let source = synthetic::open(self.benchmark, table, self.scale_factor, self.seed);
         let file = File::create(&path).map_err(|e| io_error(&path, e))?;
-        let window = self.buffered * 2;
+        let buffered = self.buffered.min(MAX_SYNTHETIC_BUFFERED);
+        let window = buffered * 2;
         let jobs = source.blocks() as usize;
         let rows = match self.format {
             Format::Tbl => {
@@ -313,7 +315,7 @@ impl TableJob<'_> {
                     BufWriter::new(file),
                     source.schema(),
                     self.compression,
-                    self.buffered,
+                    buffered,
                 )
                 .map_err(|e| writer_error(&path, e))?;
                 pipeline::ordered(

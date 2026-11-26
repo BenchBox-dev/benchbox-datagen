@@ -35,8 +35,23 @@ fn push_padded(out: &mut Vec<u8>, value: i64, width: usize) {
     out.extend_from_slice(digits);
 }
 
+fn upper_bound(columns: &[Column<'_>], rows: usize) -> usize {
+    let per_row = columns.len();
+    let values: usize = columns
+        .iter()
+        .map(|column| match column {
+            Column::Int32(_) => rows * 11,
+            Column::Int64(_) => rows * 20,
+            Column::Date(_) => rows * 10,
+            Column::Text(array) => array.value_data().len(),
+        })
+        .sum();
+    values + rows * per_row
+}
+
 pub(crate) fn encode(batch: &RecordBatch, out: &mut Vec<u8>) {
     let columns = columns(batch);
+    out.reserve(upper_bound(&columns, batch.num_rows()));
     let mut digits = itoa::Buffer::new();
     for row in 0..batch.num_rows() {
         for (index, column) in columns.iter().enumerate() {

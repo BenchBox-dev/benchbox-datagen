@@ -514,7 +514,7 @@ impl Table for Lineorder {
         let mut flags = self.orders.block(index);
         let mut draw = self.fields.block(index);
         let mut ints: [Vec<i64>; 15] = std::array::from_fn(|_| Vec::with_capacity(rows));
-        let mut priorities = StringBuilder::with_capacity(rows, rows * 8);
+        let mut priorities = StringBuilder::with_capacity(rows, rows * 16);
         let mut ship_modes = StringBuilder::with_capacity(rows, rows * 8);
         let (customers, suppliers, parts) = (
             self.customers as i64,
