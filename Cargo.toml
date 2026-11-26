@@ -18,6 +18,8 @@ tempfile = "3"
 pyo3 = { version = "0.30", features = ["abi3-py311"] }
 pyo3-arrow = "0.21"
 thiserror = "2"
+tpcdsgen = "=4.0.0"
+tpcdsgen-arrow = { version = "=4.0.0", default-features = false, features = ["arrow_60"] }
 tpchgen = "=4.0.0"
 tpchgen-arrow = { version = "=4.0.0", default-features = false, features = ["arrow_60"] }
 

@@ -10,6 +10,8 @@ repository.workspace = true
 [dependencies]
 arrow.workspace = true
 benchbox-datagen-writers.workspace = true
+tpcdsgen.workspace = true
+tpcdsgen-arrow.workspace = true
 thiserror.workspace = true
 tpchgen.workspace = true
 tpchgen-arrow.workspace = true

@@ -6,8 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use benchbox_datagen_core::{
-    Benchmark, Error, FileStats, OutputRequest, TableRequest, record_batches, row_counts,
-    write_benchmark_cancellable,
+    Benchmark, Error, FileStats, OutputRequest, TableRequest, key_ranges, record_batches,
+    row_counts, write_benchmark_cancellable,
 };
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -178,6 +178,31 @@ fn row_counts_py<'py>(
     Ok(result)
 }
 
+#[pyfunction(name = "key_ranges")]
+fn key_ranges_py<'py>(
+    py: Python<'py>,
+    benchmark: &str,
+    scale_factor: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
+    let ranges = py
+        .detach(|| key_ranges(benchmark, scale_factor))
+        .map_err(value_error)?;
+    let result = PyDict::new(py);
+    for range in ranges {
+        let table = match result.get_item(range.table)? {
+            Some(table) => table.cast_into::<PyDict>()?,
+            None => {
+                let table = PyDict::new(py);
+                result.set_item(range.table, &table)?;
+                table
+            }
+        };
+        table.set_item(range.column, (range.min, range.max))?;
+    }
+    Ok(result)
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -187,5 +212,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(table_names, module)?)?;
     module.add_function(wrap_pyfunction!(write_tables, module)?)?;
     module.add_function(wrap_pyfunction!(row_counts_py, module)?)?;
+    module.add_function(wrap_pyfunction!(key_ranges_py, module)?)?;
     Ok(())
 }
