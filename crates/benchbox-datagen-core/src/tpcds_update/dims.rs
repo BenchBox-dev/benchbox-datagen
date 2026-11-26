@@ -558,3 +558,46 @@ pub(super) fn write_zip_to_gmt(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStat
     }
     Ok(vec![out.finish()?])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::source_table_rows;
+
+    const TABLES: [&str; 11] = [
+        "s_customer_address",
+        "s_call_center",
+        "s_catalog_page",
+        "s_customer",
+        "s_item",
+        "s_promotion",
+        "s_store",
+        "s_warehouse",
+        "s_web_page",
+        "s_web_site",
+        "s_zip_to_gmt",
+    ];
+
+    #[test]
+    fn source_table_rows_equal_the_patched_dsdgen_counts() {
+        let cases: [(f64, [i64; 11]); 6] = [
+            (0.01, [1, 1, 1, 50, 5, 1, 1, 1, 1, 1, 400]),
+            (1.0, [25, 1, 150, 5000, 500, 5, 1, 1, 6, 1, 99_400]),
+            (100.0, [100, 1, 240, 20_000, 1000, 10, 2, 1, 200, 1, 99_400]),
+            (300.0, [250, 1, 240, 50_000, 1300, 13, 4, 1, 260, 1, 99_400]),
+            (1000.0, [600, 1, 240, 120_000, 1500, 15, 5, 1, 300, 1, 99_400]),
+            (3000.0, [1500, 1, 240, 300_000, 1800, 18, 6, 1, 360, 1, 99_400]),
+        ];
+        for (scale, expected) in cases {
+            for (table, rows) in TABLES.iter().zip(expected) {
+                let counted = source_table_rows(table, scale);
+                let printed = if *table == "s_zip_to_gmt" {
+                    let zips = counted;
+                    zips - 600.min(zips)
+                } else {
+                    counted
+                };
+                assert_eq!(printed, rows, "{table} at scale {scale}");
+            }
+        }
+    }
+}

@@ -17,52 +17,6 @@ use super::ctx::Ctx;
 use super::out::Out;
 use crate::{Error, FileStats};
 
-const SCALE_VOLUMES: [i64; 9] = [1, 10, 100, 300, 1000, 3000, 10_000, 30_000, 100_000];
-
-struct Rowcount {
-    weights: [i64; 9],
-    power: u32,
-}
-
-fn rowcount(table: &str) -> Rowcount {
-    let (weights, power) = match table {
-        "s_call_center" | "s_warehouse" | "s_web_site" => ([1; 9], 0),
-        "s_catalog_page" => ([150, 210, 240, 240, 240, 240, 240, 240, 240], 0),
-        "s_customer" => ([5, 10, 20, 50, 120, 300, 650, 800, 1000], 3),
-        "s_customer_address" => ([25, 40, 100, 250, 600, 1500, 3250, 4000, 5000], 0),
-        "s_item" => ([5, 7, 10, 13, 15, 18, 20, 23, 25], 2),
-        "s_promotion" => ([5, 7, 10, 13, 15, 18, 20, 23, 25], 0),
-        "s_store" => ([1, 1, 2, 4, 5, 6, 7, 8, 9], 0),
-        "s_web_page" => ([6, 1, 200, 260, 300, 360, 400, 460, 500], 0),
-        "s_zip_to_gmt" => ([100; 9], 3),
-        other => unreachable!("no source rowcount for {other:?}"),
-    };
-    Rowcount { weights, power }
-}
-
-pub(super) fn s_rows(table: &str, scale: f64) -> i64 {
-    let Rowcount { weights, power } = rowcount(table);
-    let multiplier = 10_i64.pow(power);
-    if scale < 1.0 {
-        return (((weights[0] * multiplier) as f64 * scale) as i64).max(1);
-    }
-    let mut target = scale as i64;
-    let base = match SCALE_VOLUMES.iter().position(|volume| *volume == target) {
-        Some(index) => weights[index],
-        None => {
-            let mut total = 0;
-            for index in (0..SCALE_VOLUMES.len()).rev() {
-                while target >= SCALE_VOLUMES[index] {
-                    total += weights[index];
-                    target -= SCALE_VOLUMES[index];
-                }
-            }
-            total
-        }
-    };
-    base * multiplier
-}
-
 fn concurrent_web_sites(scale: f64) -> i64 {
     if scale < 1.0 {
         return ((2.0 * scale) as i64).max(1);
@@ -222,7 +176,7 @@ struct CallCenterOld {
 
 fn write_call_center(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let mut out = Out::create(dir, "s_call_center", ctx.plan.update)?;
-    let rows = s_rows("s_call_center", ctx.scale);
+    let rows = super::dims::source_table_rows("s_call_center", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = CallCenterOld::default();
     let mut open_date = 0;
@@ -314,7 +268,7 @@ struct ItemOld {
 
 fn write_item(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let mut out = Out::create(dir, "s_item", ctx.plan.update)?;
-    let rows = s_rows("s_item", ctx.scale);
+    let rows = super::dims::source_table_rows("s_item", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = ItemOld::default();
     for index in 1..=rows {
@@ -401,7 +355,7 @@ struct StoreOld {
 
 fn write_store(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let mut out = Out::create(dir, "s_store", ctx.plan.update)?;
-    let rows = s_rows("s_store", ctx.scale);
+    let rows = super::dims::source_table_rows("s_store", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = StoreOld::default();
     for index in 1..=rows {
@@ -500,7 +454,7 @@ fn web_site_duration(scale: f64) -> i64 {
 
 fn write_web_page(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let mut out = Out::create(dir, "s_web_page", ctx.plan.update)?;
-    let rows = s_rows("s_web_page", ctx.scale);
+    let rows = super::dims::source_table_rows("s_web_page", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = WebPageOld::default();
     let duration = web_site_duration(ctx.scale);
@@ -590,7 +544,7 @@ struct WebSiteOld {
 
 fn write_web_site(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let mut out = Out::create(dir, "s_web_site", ctx.plan.update)?;
-    let rows = s_rows("s_web_site", ctx.scale);
+    let rows = super::dims::source_table_rows("s_web_site", ctx.scale);
     let mut old = WebSiteOld::default();
     let duration = web_site_duration(ctx.scale);
     let mut open_date = 0;

@@ -5,7 +5,6 @@ use tpcdsgen::distribution::DistributionFileLoader;
 use super::columns::Col;
 use super::rng::Rng;
 
-pub(super) const CALENDAR_UNIFORM: usize = 1;
 pub(super) const CALENDAR_SALES: usize = 3;
 pub(super) const CALENDAR_LOW: usize = 8;
 pub(super) const CALENDAR_MEDIUM: usize = 9;
@@ -56,13 +55,12 @@ pub(super) fn calendar() -> &'static Calendar {
 impl Calendar {
     pub(super) fn weight(&self, entry: i32, set: usize) -> i32 {
         let sums = &self.cumulative[set - 1];
+        let sum_at = |index: usize| sums.get(index).copied().unwrap_or(0);
         let index = (entry - 1) as usize;
-        if index >= sums.len() {
-            0
-        } else if index == 0 {
-            sums[0]
+        if index == 0 {
+            sum_at(0)
         } else {
-            sums[index] - sums[index - 1]
+            sum_at(index) - sum_at(index - 1)
         }
     }
 

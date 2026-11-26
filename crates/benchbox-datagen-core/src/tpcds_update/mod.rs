@@ -64,6 +64,7 @@ fn write_set(
         )?,
     ];
     stats.extend(dims::write_dimensions(&mut ctx, dir)?);
+    stats.extend(scd::write_scd_tables(&mut ctx, dir)?);
     stats.extend(orders::write_catalog_orders(&mut ctx, dir)?);
     stats.extend(dims::write_inventory(&mut ctx, dir)?);
     stats.extend(orders::write_purchases(&mut ctx, dir)?);
