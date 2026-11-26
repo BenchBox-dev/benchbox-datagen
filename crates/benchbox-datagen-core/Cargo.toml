@@ -18,6 +18,8 @@ tpchgen.workspace = true
 tpchgen-arrow.workspace = true
 
 [dev-dependencies]
+flate2 = "1"
+serde_json = "1"
 tempfile.workspace = true
 
 [lints]

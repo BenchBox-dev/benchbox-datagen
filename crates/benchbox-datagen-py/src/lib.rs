@@ -6,8 +6,9 @@ use std::thread;
 use std::time::Duration;
 
 use benchbox_datagen_core::{
-    Benchmark, Error, FileStats, OutputRequest, TableRequest, key_ranges, record_batches,
-    row_counts_cancellable, write_benchmark_cancellable,
+    Benchmark, Error, FileStats, OutputRequest, QueryRequest, TableRequest,
+    generate_query as core_generate_query, key_ranges, record_batches, row_counts_cancellable,
+    write_benchmark_cancellable,
 };
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -226,6 +227,37 @@ fn key_ranges_py<'py>(
     Ok(result)
 }
 
+#[pyfunction]
+#[pyo3(signature = (benchmark, query, template_text, distributions_text, scale_factor, seed = None, stream = None, default_params = false))]
+#[allow(clippy::too_many_arguments)]
+fn generate_query(
+    benchmark: &str,
+    query: &str,
+    template_text: &str,
+    distributions_text: &str,
+    scale_factor: f64,
+    seed: Option<i64>,
+    stream: Option<u32>,
+    default_params: bool,
+) -> PyResult<(String, Vec<String>)> {
+    if benchmark != "tpch" {
+        return Err(PyValueError::new_err(format!(
+            "query generation is not available for benchmark {benchmark:?}"
+        )));
+    }
+    let generated = core_generate_query(&QueryRequest {
+        query,
+        template: template_text,
+        distributions: distributions_text,
+        scale_factor,
+        seed,
+        stream,
+        default_params,
+    })
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((generated.text, generated.params))
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -236,5 +268,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(write_tables, module)?)?;
     module.add_function(wrap_pyfunction!(row_counts_py, module)?)?;
     module.add_function(wrap_pyfunction!(key_ranges_py, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_query, module)?)?;
     Ok(())
 }
