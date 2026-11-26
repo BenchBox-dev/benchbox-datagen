@@ -1,0 +1,86 @@
+name: wheels
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64-glibc, runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, manylinux: "2_28", test: pyarrow }
+          - { name: linux-aarch64-glibc, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, manylinux: "2_28", test: pyarrow }
+          - { name: linux-x86_64-musl, runner: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2, test: import }
+          - { name: linux-aarch64-musl, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, manylinux: musllinux_1_2, test: import }
+          - { name: macos-arm64, runner: macos-latest, target: aarch64-apple-darwin, manylinux: "off", test: pyarrow }
+          - { name: macos-x86_64, runner: macos-15-intel, target: x86_64-apple-darwin, manylinux: "off", test: pyarrow }
+          - { name: windows-x86_64, runner: windows-latest, target: x86_64-pc-windows-msvc, manylinux: "off", test: pyarrow }
+          - { name: windows-arm64, runner: windows-11-arm, target: aarch64-pc-windows-msvc, manylinux: "off", test: import }
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.11"
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --out dist
+      - name: Test the wheel with pyarrow
+        if: matrix.test == 'pyarrow'
+        shell: bash
+        run: |
+          python -m venv .wheel-test
+          if [ -d .wheel-test/Scripts ]; then bin=.wheel-test/Scripts; else bin=.wheel-test/bin; fi
+          "$bin/python" -m pip install --quiet pyarrow pytest dist/*.whl
+          "$bin/python" -m pytest tests
+      - name: Test the wheel imports on musl
+        if: matrix.test == 'import' && contains(matrix.target, 'musl')
+        run: |
+          docker run --rm -v "$PWD/dist:/dist" python:3.11-alpine sh -c \
+            'pip install --quiet /dist/*.whl && python -c "import benchbox_datagen as b; assert b.table_names(\"tpch\")[0] == \"nation\"; assert hasattr(b.generate_table(\"tpch\", \"nation\", 1.0), \"__arrow_c_stream__\")"'
+      - name: Test the wheel imports natively
+        if: matrix.test == 'import' && !contains(matrix.target, 'musl')
+        shell: bash
+        run: |
+          python -m venv .wheel-test
+          .wheel-test/Scripts/python -m pip install --quiet dist/*.whl
+          .wheel-test/Scripts/python -c "import benchbox_datagen as b; assert b.table_names('tpch')[0] == 'nation'; assert hasattr(b.generate_table('tpch', 'nation', 1.0), '__arrow_c_stream__')"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.11"
+      - name: Build and test the sdist
+        run: |
+          python -m venv .sdist-test
+          .sdist-test/bin/python -m pip install --quiet pyarrow pytest dist/*.tar.gz
+          .sdist-test/bin/python -m pytest tests
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: sdist
+          path: dist/*.tar.gz

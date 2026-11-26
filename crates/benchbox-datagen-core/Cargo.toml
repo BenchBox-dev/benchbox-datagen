@@ -1,0 +1,17 @@
+[package]
+name = "benchbox-datagen-core"
+description = "Deterministic benchmark data generators for BenchBox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+arrow.workspace = true
+thiserror.workspace = true
+tpchgen.workspace = true
+tpchgen-arrow.workspace = true
+
+[lints]
+workspace = true
