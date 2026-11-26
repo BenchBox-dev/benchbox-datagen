@@ -179,17 +179,18 @@ fn row_counts_py<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (benchmark, scale_factor, output_dir, sets = 1))]
+#[pyo3(signature = (benchmark, scale_factor, output_dir, sets = 1, rng_seed = None))]
 fn write_refresh(
     py: Python<'_>,
     benchmark: &str,
     scale_factor: f64,
     output_dir: PathBuf,
     sets: i32,
+    rng_seed: Option<i32>,
 ) -> PyResult<Vec<FileStat>> {
     let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
     let stats = py
-        .detach(|| write_refresh_sets(benchmark, scale_factor, sets, &output_dir))
+        .detach(|| write_refresh_sets(benchmark, scale_factor, sets, rng_seed, &output_dir))
         .map_err(|error| match error {
             Error::Write(message) => PyOSError::new_err(message),
             other => value_error(other),
