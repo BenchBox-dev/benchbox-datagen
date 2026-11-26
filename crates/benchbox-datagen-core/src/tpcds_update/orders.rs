@@ -1,8 +1,10 @@
 use std::path::Path;
 
 use tpcdsgen::permutations::make_permutation;
-use tpcdsgen::types::pricing::{Pricing, generate_pricing_for_sales_table, get_web_sales_pricing_limits};
 use tpcdsgen::types::Decimal;
+use tpcdsgen::types::pricing::{
+    Pricing, generate_pricing_for_sales_table, get_web_sales_pricing_limits,
+};
 
 use super::calendar::TODAYS_DATE;
 use super::columns::*;
@@ -150,7 +152,11 @@ pub(super) fn write_purchases(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats
         ctx.rng.row_stop(TABLE_S_PURCHASE_LINEITEM);
         ctx.rng.row_stop(TABLE_S_STORE_RETURNS);
     }
-    Ok(vec![purchases.finish()?, lines.finish()?, returns.finish()?])
+    Ok(vec![
+        purchases.finish()?,
+        lines.finish()?,
+        returns.finish()?,
+    ])
 }
 
 fn master_customers(ctx: &mut Ctx, bill: Col, ship: Col) -> (i64, i64) {
@@ -224,8 +230,7 @@ pub(super) fn write_catalog_orders(ctx: &mut Ctx, dir: &Path) -> Result<Vec<File
                 .key(page)
                 .decimal(&line.price.get_ship_cost())
                 .end()?;
-            if ctx.rng.int(S_CLIN_IS_RETURNED, 0, 9999) < CATALOG_RETURN_PCT
-                && line.ship_date != -1
+            if ctx.rng.int(S_CLIN_IS_RETURNED, 0, 9999) < CATALOG_RETURN_PCT && line.ship_date != -1
             {
                 let lag = ctx.rng.int(S_CRET_DATE, 0, 60);
                 let time = ctx.join_time(S_CRET_TIME);

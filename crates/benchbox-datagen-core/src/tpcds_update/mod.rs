@@ -21,7 +21,11 @@ pub(crate) use rng::DEFAULT_SEED;
 fn write_delete_file(path: &Path, dates: &[i32; 6]) -> Result<FileStats, Error> {
     let mut text = String::new();
     for pair in dates.chunks(2) {
-        text.push_str(&format!("{}|{}\n", date_string(pair[0]), date_string(pair[1])));
+        text.push_str(&format!(
+            "{}|{}\n",
+            date_string(pair[0]),
+            date_string(pair[1])
+        ));
     }
     let io = |e: std::io::Error| Error::Write(format!("{}: {e}", path.display()));
     let mut file = File::create(path).map_err(io)?;
@@ -57,7 +61,10 @@ fn write_set(
 ) -> Result<Vec<FileStats>, Error> {
     let mut ctx = Ctx::new(scale_factor, update, seed);
     let mut stats = vec![
-        write_delete_file(&dir.join(format!("delete_{update}.dat")), &ctx.plan.update_dates)?,
+        write_delete_file(
+            &dir.join(format!("delete_{update}.dat")),
+            &ctx.plan.update_dates,
+        )?,
         write_delete_file(
             &dir.join(format!("inventory_delete_{update}.dat")),
             &ctx.plan.inventory_dates,
@@ -128,7 +135,11 @@ mod tests {
             .collect();
         assert_eq!(seen, expected);
         for (name, _, bytes) in SF1_SET1 {
-            assert_eq!(fs::metadata(dir.path().join(name)).unwrap().len(), bytes, "{name}");
+            assert_eq!(
+                fs::metadata(dir.path().join(name)).unwrap().len(),
+                bytes,
+                "{name}"
+            );
         }
     }
 
@@ -144,13 +155,12 @@ mod tests {
             read(dir.path(), "inventory_delete_2.dat"),
             "2001-03-22|2001-03-29\n2000-08-17|2000-08-24\n1999-11-25|1999-12-02\n"
         );
+        assert!(read(dir.path(), "s_purchase_1.dat").starts_with(
+            "1|AAAAAAAAEAAAAAAA|AAAAAAAAELMNAAAA|2000-05-20|0|10|244|So sound alternatives"
+        ));
         assert!(
-            read(dir.path(), "s_purchase_1.dat").starts_with(
-                "1|AAAAAAAAEAAAAAAA|AAAAAAAAELMNAAAA|2000-05-20|0|10|244|So sound alternatives"
-            )
-        );
-        assert!(
-            read(dir.path(), "s_purchase_2.dat").starts_with("1|AAAAAAAAEAAAAAAA|AAAAAAAAELMNAAAA|2001-03-23|0|10|244|")
+            read(dir.path(), "s_purchase_2.dat")
+                .starts_with("1|AAAAAAAAEAAAAAAA|AAAAAAAAELMNAAAA|2001-03-23|0|10|244|")
         );
         assert_eq!(
             read(dir.path(), "s_inventory_2.dat").lines().next(),
@@ -171,7 +181,11 @@ mod tests {
         write_tpcds_refresh(0.01, 1, 20_260_709, second.path()).unwrap();
         write_tpcds_refresh(0.01, 1, DEFAULT_SEED, other.path()).unwrap();
         for name in ["s_purchase_1.dat", "s_customer_1.dat", "delete_1.dat"] {
-            assert_eq!(read(first.path(), name), read(second.path(), name), "{name}");
+            assert_eq!(
+                read(first.path(), name),
+                read(second.path(), name),
+                "{name}"
+            );
             assert_ne!(read(first.path(), name), read(other.path(), name), "{name}");
         }
     }

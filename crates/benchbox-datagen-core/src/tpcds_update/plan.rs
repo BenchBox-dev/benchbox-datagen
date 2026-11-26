@@ -1,6 +1,6 @@
 use super::calendar::{
-    CALENDAR_HIGH, CALENDAR_LOW, CALENDAR_MEDIUM, CALENDAR_SALES, calendar,
-    day_number, day_of_week, is_leap, jtodt,
+    CALENDAR_HIGH, CALENDAR_LOW, CALENDAR_MEDIUM, CALENDAR_SALES, calendar, day_number,
+    day_of_week, is_leap, jtodt,
 };
 use super::columns::Col;
 use super::rng::Rng;

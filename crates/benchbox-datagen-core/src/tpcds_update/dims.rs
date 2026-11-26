@@ -9,9 +9,9 @@ use tpcdsgen::distribution::{
     DemographicsDistributions, FirstNamesWeights, IntValuesDistribution, LocationTypeWeights,
     LocationTypesDistribution, NamesDistributions, SalutationsWeights,
 };
+use tpcdsgen::nulls::create_null_bit_map;
 use tpcdsgen::permutations::make_permutation;
 use tpcdsgen::random::RandomValueGenerator;
-use tpcdsgen::nulls::create_null_bit_map;
 use tpcdsgen::types::{Address, Decimal};
 
 use super::calendar::{DATA_START_DATE, TODAYS_DATE, dttoj};
@@ -45,7 +45,10 @@ fn row_spec(table: &str) -> RowSpec {
         "s_zip_to_gmt" => (3, [100; 9]),
         other => unreachable!("no source table {other:?}"),
     };
-    RowSpec { multiplier, weights }
+    RowSpec {
+        multiplier,
+        weights,
+    }
 }
 
 pub(super) fn source_table_rows(table: &str, scale: f64) -> i64 {
@@ -70,7 +73,10 @@ pub(super) fn source_table_rows(table: &str, scale: f64) -> i64 {
 fn first_name_weights(gender: &str) -> (FirstNamesWeights, SalutationsWeights) {
     match gender {
         "M" => (FirstNamesWeights::MaleFrequency, SalutationsWeights::Male),
-        "F" => (FirstNamesWeights::FemaleFrequency, SalutationsWeights::Female),
+        "F" => (
+            FirstNamesWeights::FemaleFrequency,
+            SalutationsWeights::Female,
+        ),
         _ => (
             FirstNamesWeights::GeneralFrequency,
             SalutationsWeights::GenderNeutral,
@@ -243,8 +249,14 @@ fn write_customer(
         );
         let email =
             RandomValueGenerator::generate_random_email(first, last, ctx.rng.stream(S_CUST_EMAIL));
-        let last_login = one_year_ago + ctx.rng.int(S_CUST_LAST_LOGIN, 0, TODAYS_DATE - one_year_ago);
-        let review = one_year_ago + ctx.rng.int(S_CUST_LAST_REVIEW, 0, TODAYS_DATE - one_year_ago);
+        let last_login = one_year_ago
+            + ctx
+                .rng
+                .int(S_CUST_LAST_LOGIN, 0, TODAYS_DATE - one_year_ago);
+        let review = one_year_ago
+            + ctx
+                .rng
+                .int(S_CUST_LAST_REVIEW, 0, TODAYS_DATE - one_year_ago);
         let primary = ip_address(ctx, S_CUST_PRIMARY_MACHINE);
         let secondary = ip_address(ctx, S_CUST_SECONDARY_MACHINE);
         let location = LocationTypesDistribution::pick_random_location_type(
@@ -308,7 +320,10 @@ fn write_customer(
 
 fn ip_address(ctx: &mut Ctx, column: Col) -> String {
     let quads: Vec<i32> = (0..4).map(|_| ctx.rng.int(column, 1, 255)).collect();
-    format!("{:03}.{:03}.{:03}.{:03}", quads[0], quads[1], quads[2], quads[3])
+    format!(
+        "{:03}.{:03}.{:03}.{:03}",
+        quads[0], quads[1], quads[2], quads[3]
+    )
 }
 
 pub(super) fn make_word(source: i64, max_chars: usize) -> String {
@@ -335,10 +350,13 @@ fn is_null(map: i64, span: Span, column: Col) -> bool {
 fn write_promotion(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, Error> {
     let mut out = Out::create(dir, "s_promotion", update)?;
     let rows = source_table_rows("s_promotion", ctx.scale);
-    let permutation = make_permutation(ctx.ids("promotion") as usize, ctx.rng.stream(S_PROMOTION_ID));
+    let permutation = make_permutation(
+        ctx.ids("promotion") as usize,
+        ctx.rng.stream(S_PROMOTION_ID),
+    );
     let details = ctx.text;
-    for index in 0..rows as usize {
-        let id = i64::from(permutation[index]) + 1;
+    for &entry in permutation.iter().take(rows as usize) {
+        let id = i64::from(entry) + 1;
         let nulls = create_null_bit_map(UpstreamTable::Promotion, ctx.rng.stream(P_NULLS));
         let null = |column: Col| is_null(nulls, TABLE_PROMOTION, column);
         let start = DATA_START_DATE + ctx.rng.int(P_START_DATE_ID, -720, 100);
@@ -422,8 +440,8 @@ fn write_warehouse(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, 
     let mut out = Out::create(dir, "s_warehouse", update)?;
     let rows = source_table_rows("s_warehouse", ctx.scale);
     let permutation = make_permutation(ctx.ids("warehouse") as usize, ctx.rng.stream(S_WRHS_ID));
-    for index in 0..rows as usize {
-        let id = i64::from(permutation[index]) + 1;
+    for &entry in permutation.iter().take(rows as usize) {
+        let id = i64::from(entry) + 1;
         let nulls = create_null_bit_map(UpstreamTable::Warehouse, ctx.rng.stream(W_NULLS));
         let name = ctx.gen_text(W_WAREHOUSE_NAME, 10, 20);
         let sq_ft = ctx.rng.int(W_WAREHOUSE_SQ_FT, 50_000, 1_000_000);
@@ -584,8 +602,14 @@ mod tests {
             (1.0, [25, 1, 150, 5000, 500, 5, 1, 1, 6, 1, 99_400]),
             (100.0, [100, 1, 240, 20_000, 1000, 10, 2, 1, 200, 1, 99_400]),
             (300.0, [250, 1, 240, 50_000, 1300, 13, 4, 1, 260, 1, 99_400]),
-            (1000.0, [600, 1, 240, 120_000, 1500, 15, 5, 1, 300, 1, 99_400]),
-            (3000.0, [1500, 1, 240, 300_000, 1800, 18, 6, 1, 360, 1, 99_400]),
+            (
+                1000.0,
+                [600, 1, 240, 120_000, 1500, 15, 5, 1, 300, 1, 99_400],
+            ),
+            (
+                3000.0,
+                [1500, 1, 240, 300_000, 1800, 18, 6, 1, 360, 1, 99_400],
+            ),
         ];
         for (scale, expected) in cases {
             for (table, rows) in TABLES.iter().zip(expected) {

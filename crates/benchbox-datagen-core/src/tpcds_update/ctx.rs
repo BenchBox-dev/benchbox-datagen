@@ -1,5 +1,5 @@
-use tpcdsgen::distribution::hours_distribution::{HoursDistribution, HoursWeights};
 use tpcdsgen::distribution::CatalogPageTypesDistribution;
+use tpcdsgen::distribution::hours_distribution::{HoursDistribution, HoursWeights};
 use tpcdsgen::random::RandomTextGenerator;
 
 use super::columns::Col;
@@ -60,7 +60,8 @@ impl Ctx {
     }
 
     pub(super) fn join_time(&mut self, column: Col) -> i64 {
-        let hour = HoursDistribution::pick_random_hour(HoursWeights::Uniform, self.rng.stream(column));
+        let hour =
+            HoursDistribution::pick_random_hour(HoursWeights::Uniform, self.rng.stream(column));
         let seconds = self.rng.int(column, 0, 3599);
         i64::from(hour) * 3600 + i64::from(seconds)
     }
@@ -71,9 +72,8 @@ impl Ctx {
 
     pub(super) fn join_catalog_page(&mut self, column: Col, julian: i32) -> i64 {
         let per_catalog = self.pages_per_catalog();
-        let kind = CatalogPageTypesDistribution::pick_random_catalog_page_type(
-            self.rng.stream(column),
-        );
+        let kind =
+            CatalogPageTypesDistribution::pick_random_catalog_page_type(self.rng.stream(column));
         let page = i64::from(self.rng.int(column, 1, per_catalog as i32));
         let offset = i64::from(julian) - i64::from(super::calendar::DATA_START_DATE) - 1;
         let mut count = (offset / 365) * CATALOGS_PER_YEAR;

@@ -102,7 +102,11 @@ impl Nulls {
         let threshold = ctx.rng.int(column, 0, 9999);
         let bits = ctx.rng.key(column, 1, i64::from(i32::MAX));
         Self {
-            mask: if threshold < percent { bits & !not_null } else { 0 },
+            mask: if threshold < percent {
+                bits & !not_null
+            } else {
+                0
+            },
             first_column: span.first,
         }
     }
@@ -206,16 +210,15 @@ fn write_call_center(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
             bits: ctx.rng.next(CC_SCD) as i32,
             first: key.first,
         };
-        let class = CallCenterDistributions::pick_random_call_center_class(ctx.rng.stream(CC_CLASS));
+        let class =
+            CallCenterDistributions::pick_random_call_center_class(ctx.rng.stream(CC_CLASS));
         flags.skip(1);
         let mut employees = ctx.rng.int(CC_EMPLOYEES, 1, employee_limit);
         flags.keep(&mut employees, &mut old.employees);
-        let mut sq_ft = ctx
-            .rng
-            .int(CC_SQ_FT, 100, 700)
-            .wrapping_mul(employees);
+        let mut sq_ft = ctx.rng.int(CC_SQ_FT, 100, 700).wrapping_mul(employees);
         flags.keep(&mut sq_ft, &mut old.sq_ft);
-        let hours = CallCenterDistributions::pick_random_call_center_hours(ctx.rng.stream(CC_HOURS));
+        let hours =
+            CallCenterDistributions::pick_random_call_center_hours(ctx.rng.stream(CC_HOURS));
         flags.skip(1);
         let mut manager = person(ctx, CC_MANAGER);
         flags.keep(&mut manager, &mut old.manager);
@@ -276,7 +279,8 @@ fn write_item(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
         let sk = order.surrogate_key(ctx, index, S_ITEM_ID);
         let key = revision(ITEM_TABLE, sk);
 
-        let (low, high) = pick_random_manager_id_range(IdWeights::Unified, ctx.rng.stream(I_MANAGER_ID));
+        let (low, high) =
+            pick_random_manager_id_range(IdWeights::Unified, ctx.rng.stream(I_MANAGER_ID));
         let manager = ctx.rng.key(I_MANAGER_ID, i64::from(low), i64::from(high));
         let mut flags = Flags {
             bits: ctx.rng.next(I_SCD) as i32,
@@ -368,9 +372,11 @@ fn write_store(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
             first: key.first,
         };
         let percentage = ctx.rng.int(W_STORE_CLOSED_DATE_ID, 1, 100);
-        let days_open = ctx
-            .rng
-            .int(W_STORE_CLOSED_DATE_ID, STORE_MIN_DAYS_OPEN, STORE_MAX_DAYS_OPEN);
+        let days_open = ctx.rng.int(
+            W_STORE_CLOSED_DATE_ID,
+            STORE_MIN_DAYS_OPEN,
+            STORE_MAX_DAYS_OPEN,
+        );
         let mut closed_date = if percentage < STORE_CLOSED_PCT {
             i64::from(DATA_START_DATE) + i64::from(days_open)
         } else {
@@ -386,7 +392,8 @@ fn write_store(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
         flags.keep(&mut employees, &mut old.employees);
         let mut floor_space = ctx.rng.int(W_STORE_FLOOR_SPACE, 5_000_000, 10_000_000);
         flags.keep(&mut floor_space, &mut old.floor_space);
-        let hours = CallCenterDistributions::pick_random_call_center_hours(ctx.rng.stream(W_STORE_HOURS));
+        let hours =
+            CallCenterDistributions::pick_random_call_center_hours(ctx.rng.stream(W_STORE_HOURS));
         flags.skip(1);
         let mut manager = person(ctx, W_STORE_MANAGER);
         flags.keep(&mut manager, &mut old.manager);
@@ -485,7 +492,8 @@ fn write_web_page(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
         let mut autogen = i32::from(ctx.rng.int(WP_AUTOGEN_FLAG, 0, 99) < WP_AUTOGEN_PCT);
         flags.keep(&mut autogen, &mut old.autogen);
         flags.skip(2);
-        let page_type = WebPageUseDistribution::pick_random_web_page_use_type(ctx.rng.stream(WP_TYPE));
+        let page_type =
+            WebPageUseDistribution::pick_random_web_page_use_type(ctx.rng.stream(WP_TYPE));
         flags.skip(1);
         let mut link_count = ctx.rng.int(WP_LINK_COUNT, 2, 25);
         flags.keep(&mut link_count, &mut old.link_count);
@@ -561,7 +569,11 @@ fn write_web_site(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
                 closed += duration / 2;
             }
             open_date = opened as i32;
-            close_date = if closed > key.end_date { -1 } else { closed as i32 };
+            close_date = if closed > key.end_date {
+                -1
+            } else {
+                closed as i32
+            };
             name = format!("site_{}", sk / 6);
         }
         let mut flags = Flags {
