@@ -1,12 +1,16 @@
 import json
 import sys
 
+from benchbox.core.ssb.benchmark import SSBBenchmark
 from benchbox.core.tpch.benchmark import TPCHBenchmark
 from benchbox.utils.format_converters.base import ArrowTypeMapper
 
 
+BENCHMARKS = {"tpch": TPCHBenchmark, "ssb": SSBBenchmark}
+
+
 def main() -> int:
-    schemas = TPCHBenchmark(scale_factor=0.01).get_schema()
+    schemas = BENCHMARKS[sys.argv[1] if len(sys.argv) > 1 else "tpch"](scale_factor=0.01).get_schema()
     dump = {
         table: [
             [field.name, str(field.type), field.nullable]

@@ -1,0 +1,380 @@
+import argparse
+import json
+import math
+import os
+import random
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import duckdb
+
+ROOT = Path(__file__).resolve().parent.parent
+SCHEMAS = json.loads((ROOT / "tests" / "data" / "ssb_arrow_schemas.json").read_text())
+TABLES = ["date", "customer", "supplier", "part", "lineorder"]
+QUANTILES = [0.01, 0.25, 0.5, 0.75, 0.99]
+METRICS = ["null_rate", "distinct_ratio", "mean", "p1", "p25", "p50", "p75", "p99"]
+T_99_9_FOUR_DF = 8.610
+QUANTILE_METRICS = {"p1": 0.01, "p25": 0.25, "p50": 0.5, "p75": 0.75, "p99": 0.99}
+CDF_MAX_DISTINCT = 5000
+RANK_SIGMAS = 5.0
+FOREIGN_KEYS = [
+    ("lineorder", "lo_custkey", "customer", "c_custkey"),
+    ("lineorder", "lo_partkey", "part", "p_partkey"),
+    ("lineorder", "lo_suppkey", "supplier", "s_suppkey"),
+    ("lineorder", "lo_orderdate", "date", "d_datekey"),
+]
+PRIMARY_KEYS = {
+    "date": ["d_datekey"],
+    "customer": ["c_custkey"],
+    "supplier": ["s_suppkey"],
+    "part": ["p_partkey"],
+    "lineorder": ["lo_orderkey", "lo_linenumber"],
+}
+
+
+def expected_rows(scale_factor: float) -> dict[str, int]:
+    def scaled(base: int) -> int:
+        return max(1, int(base * scale_factor))
+
+    return {
+        "date": 2557,
+        "customer": scaled(30_000),
+        "supplier": scaled(2_000),
+        "part": scaled(200_000),
+        "lineorder": scaled(6_000_000),
+    }
+
+
+def is_text(table: str, column: str) -> bool:
+    return dict((name, kind) for name, kind, _ in SCHEMAS[table])[column] == "string"
+
+
+def column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str) -> dict[str, dict]:
+    selects = []
+    for name, _, _ in SCHEMAS[table]:
+        measure = f"length({name})" if is_text(table, name) else f"{name}::DOUBLE"
+        selects += [
+            f"count({name})",
+            f"count(DISTINCT {name})",
+            f"avg({measure})",
+            f"quantile_disc({measure}, {QUANTILES})",
+        ]
+    row = con.execute(f"SELECT count(*), {', '.join(selects)} FROM {source}").fetchone()
+    total, values = row[0], row[1:]
+    result = {}
+    for index, (name, _, _) in enumerate(SCHEMAS[table]):
+        present, distinct, mean, quantiles = values[index * 4 : index * 4 + 4]
+        entry = {
+            "text": is_text(table, name),
+            "null_rate": 1 - present / total,
+            "distinct": distinct,
+            "distinct_ratio": distinct / total,
+            "mean": mean,
+            **dict(zip(["p1", "p25", "p50", "p75", "p99"], quantiles or [None] * 5)),
+        }
+        if entry["text"] and distinct <= 64:
+            entry["values"] = [r[0] for r in con.execute(f"SELECT DISTINCT {name} FROM {source} ORDER BY 1").fetchall()]
+        measure = f"length({name})" if entry["text"] else f"{name}::DOUBLE"
+        if entry["text"] or distinct <= CDF_MAX_DISTINCT:
+            running, cdf = 0, []
+            for value, count in con.execute(
+                f"SELECT {measure} AS m, count(*) FROM {source} WHERE {name} IS NOT NULL GROUP BY m ORDER BY m"
+            ).fetchall():
+                running += count
+                cdf.append([value, running / total])
+            entry["cdf"] = cdf
+        result[name] = entry
+    return {"rows": total, "columns": result}
+
+
+def table_stats(con: duckdb.DuckDBPyConnection, sources: dict[str, str]) -> dict[str, dict]:
+    return {table: column_stats(con, sources[table], table) for table in TABLES}
+
+
+def parquet_sources(directory: Path) -> dict[str, str]:
+    return {table: f"read_parquet('{directory / (table + '.parquet')}')" for table in TABLES}
+
+
+def tbl_sources(directory: Path) -> dict[str, str]:
+    sources = {}
+    for table in TABLES:
+        columns = ", ".join(
+            f"'{name}': '{'VARCHAR' if kind == 'string' else 'BIGINT'}'" for name, kind, _ in SCHEMAS[table]
+        )
+        sources[table] = (
+            f"read_csv('{directory / (table + '.tbl')}', delim='|', header=false, columns={{{columns}}})"
+        )
+    return sources
+
+
+def run_legacy(scale_factor: float, seed: int, workdir: Path) -> dict:
+    from benchbox.core.ssb.generator import SSBDataGenerator
+
+    out = Path(tempfile.mkdtemp(prefix=f"legacy-{seed}-", dir=workdir))
+    try:
+        generator = SSBDataGenerator(scale_factor=scale_factor, output_dir=out, quiet=True)
+        generator._rng = random.Random(seed)
+        started = time.monotonic()
+        generator.generate_data()
+        seconds = time.monotonic() - started
+        stats = table_stats(duckdb.connect(), tbl_sources(out))
+        return {"seed": seed, "generate_seconds": seconds, "tables": stats, "query_rows": query_row_counts(tbl_sources(out))}
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def cmd_legacy(args: argparse.Namespace) -> None:
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    runs = [run_legacy(args.scale, seed, workdir) for seed in args.seeds]
+    Path(args.out).write_text(json.dumps({"scale": args.scale, "runs": runs}))
+    print(f"legacy sf={args.scale} seeds={args.seeds} -> {args.out}")
+
+
+def library_write(scale_factor: float, seed: int, directory: Path) -> None:
+    writer = os.environ.get("SSB_ACCEPT_WRITER")
+    if writer:
+        subprocess.run([writer, str(scale_factor), str(seed), "parquet", str(directory)], check=True, capture_output=True)
+        return
+    import benchbox_datagen
+
+    benchbox_datagen.write_tables("ssb", scale_factor, directory, format="parquet", seed=seed)
+
+
+def cmd_library(args: argparse.Namespace) -> None:
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    runs = []
+    for seed in args.seeds:
+        out = Path(tempfile.mkdtemp(prefix=f"library-{seed}-", dir=workdir))
+        try:
+            library_write(args.scale, seed, out)
+            runs.append(
+                {
+                    "seed": seed,
+                    "tables": table_stats(duckdb.connect(), parquet_sources(out)),
+                    "query_rows": query_row_counts(parquet_sources(out)),
+                }
+            )
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+    Path(args.out).write_text(json.dumps({"scale": args.scale, "runs": runs}))
+    print(f"library sf={args.scale} seeds={args.seeds} -> {args.out}")
+
+
+def close(a: float, b: float) -> bool:
+    return math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-12)
+
+
+def judge(new: float | None, legacy: list[float | None]) -> str:
+    if new is None or any(v is None for v in legacy):
+        return "ok" if new is None and all(v is None for v in legacy) else "FAIL"
+    low, high = min(legacy), max(legacy)
+    if low <= new <= high or close(new, low) or close(new, high):
+        return "ok"
+    if len(set(legacy)) == 1:
+        return "FAIL"
+    spread = statistics.stdev(legacy) * T_99_9_FOUR_DF * math.sqrt(1 + 1 / len(legacy))
+    return "pi" if abs(new - statistics.mean(legacy)) <= spread else "FAIL"
+
+
+def rank_ok(q: float, legacy_values: list[float], cdf: list[list[float]], rows: int) -> bool:
+    tolerance = RANK_SIGMAS * math.sqrt(q * (1 - q) / rows)
+    for value in set(legacy_values):
+        position = next((i for i, (v, _) in enumerate(cdf) if close(v, value)), None)
+        if position is None:
+            continue
+        upper = cdf[position][1]
+        lower = cdf[position - 1][1] if position else 0.0
+        if lower - tolerance <= q <= upper + tolerance:
+            return True
+    return False
+
+
+def compare_stats(legacy: dict, library_run: dict) -> list[dict]:
+    findings = []
+    for table in TABLES:
+        for name, entry in library_run["tables"][table]["columns"].items():
+            legacy_entries = [run["tables"][table]["columns"][name] for run in legacy["runs"]]
+            for metric in METRICS:
+                legacy_values = [e[metric] for e in legacy_entries]
+                verdict = judge(entry[metric], legacy_values)
+                if verdict == "FAIL" and metric in QUANTILE_METRICS and "cdf" in entry:
+                    if rank_ok(QUANTILE_METRICS[metric], legacy_values, entry["cdf"], library_run["tables"][table]["rows"]):
+                        verdict = "rank"
+                findings.append(
+                    {
+                        "table": table,
+                        "column": name,
+                        "metric": metric,
+                        "new": entry[metric],
+                        "legacy": [e[metric] for e in legacy_entries],
+                        "verdict": verdict,
+                    }
+                )
+            if "values" in entry:
+                same = all(e.get("values") == entry["values"] for e in legacy_entries)
+                findings.append(
+                    {
+                        "table": table,
+                        "column": name,
+                        "metric": "value_set",
+                        "new": entry["values"],
+                        "legacy": legacy_entries[0].get("values"),
+                        "verdict": "ok" if same else "FAIL",
+                    }
+                )
+    return findings
+
+
+def cmd_compare(args: argparse.Namespace) -> None:
+    legacy = json.loads(Path(args.legacy).read_text())
+    library = json.loads(Path(args.library).read_text())
+    findings_by_seed = {run["seed"]: compare_stats(legacy, run) for run in library["runs"]}
+    summary = {"scale": legacy["scale"], "legacy_seeds": [r["seed"] for r in legacy["runs"]], "seeds": {}}
+    for seed, findings in findings_by_seed.items():
+        counts = {"ok": 0, "pi": 0, "rank": 0, "FAIL": 0}
+        for finding in findings:
+            counts[finding["verdict"]] += 1
+        summary["seeds"][seed] = {"counts": counts, "details": [f for f in findings if f["verdict"] != "ok"]}
+    for run in legacy["runs"]:
+        summary.setdefault("legacy_rows", {}).update({t: run["tables"][t]["rows"] for t in TABLES})
+    summary["library_rows"] = {t: library["runs"][0]["tables"][t]["rows"] for t in TABLES}
+    Path(args.out).write_text(json.dumps(summary, indent=1))
+    for seed, data in summary["seeds"].items():
+        print(f"sf={legacy['scale']} seed={seed} {data['counts']}")
+
+
+def query_row_counts(sources: dict[str, str]) -> dict[str, int]:
+    con = duckdb.connect()
+    for table in TABLES:
+        con.execute(f"CREATE VIEW {table} AS SELECT * FROM {sources[table]}")
+    return {query_id: len(con.execute(sql).fetchall()) for query_id, sql in query_texts().items()}
+
+
+def query_texts() -> dict[str, str]:
+    from benchbox.core.ssb.queries import SSBQueryManager
+
+    manager = SSBQueryManager()
+    return {query_id: manager.get_query(query_id) for query_id in manager.get_all_queries()}
+
+
+def duckdb_rows(directory: Path, sql: str, con: duckdb.DuckDBPyConnection) -> list[tuple]:
+    return [tuple(row) for row in con.execute(sql).fetchall()]
+
+
+def normalise(rows: list[tuple]) -> list[tuple]:
+    return sorted(rows, key=repr)
+
+
+def verify_tables(scale_factor: float, directory: Path) -> dict:
+    con = duckdb.connect()
+    sources = parquet_sources(directory)
+    result: dict = {"rows": {}, "orphans": {}, "duplicates": {}}
+    expected = expected_rows(scale_factor)
+    for table in TABLES:
+        result["rows"][table] = {"expected": expected[table], "actual": con.execute(f"SELECT count(*) FROM {sources[table]}").fetchone()[0]}
+        keys = ", ".join(PRIMARY_KEYS[table])
+        result["duplicates"][table] = con.execute(
+            f"SELECT count(*) - count(DISTINCT ({keys})) FROM {sources[table]}"
+        ).fetchone()[0]
+    for child, child_col, parent, parent_col in FOREIGN_KEYS:
+        result["orphans"][f"{child}.{child_col}->{parent}.{parent_col}"] = con.execute(
+            f"SELECT count(*) FROM {sources[child]} c ANTI JOIN {sources[parent]} p ON c.{child_col} = p.{parent_col}"
+        ).fetchone()[0]
+    return result
+
+
+def run_queries(directory: Path) -> dict:
+    import datafusion
+
+    queries = query_texts()
+    duck = duckdb.connect()
+    for table in TABLES:
+        duck.execute(f"CREATE VIEW {table} AS SELECT * FROM read_parquet('{directory / (table + '.parquet')}')")
+    context = datafusion.SessionContext()
+    for table in TABLES:
+        context.register_parquet(table, str(directory / f"{table}.parquet"))
+    outcomes = {}
+    for query_id, sql in queries.items():
+        duck_started = time.monotonic()
+        duck_rows = [tuple(row) for row in duck.execute(sql).fetchall()]
+        duck_seconds = time.monotonic() - duck_started
+        df_started = time.monotonic()
+        batches = context.sql(sql).collect()
+        df_rows = [tuple(row.values()) for batch in batches for row in batch.to_pylist()]
+        df_seconds = time.monotonic() - df_started
+        outcomes[query_id] = {
+            "duckdb_rows": len(duck_rows),
+            "datafusion_rows": len(df_rows),
+            "agree": normalise(duck_rows) == normalise(df_rows),
+            "first_row_null": bool(duck_rows) and all(v is None for v in duck_rows[0]),
+            "duckdb_seconds": duck_seconds,
+            "datafusion_seconds": df_seconds,
+        }
+    return outcomes
+
+
+def cmd_verify(args: argparse.Namespace) -> None:
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    out = Path(tempfile.mkdtemp(prefix=f"verify-{args.scale}-", dir=workdir))
+    try:
+        started = time.monotonic()
+        library_write(args.scale, args.seed, out)
+        generate_seconds = time.monotonic() - started
+        report = {"scale": args.scale, "seed": args.seed, "generate_seconds": generate_seconds}
+        report.update(verify_tables(args.scale, out))
+        report["queries"] = run_queries(out)
+        Path(args.out).write_text(json.dumps(report, indent=1))
+        failed = (
+            any(v["expected"] != v["actual"] for v in report["rows"].values())
+            or any(report["orphans"].values())
+            or any(report["duplicates"].values())
+            or any(not q["agree"] for q in report["queries"].values())
+        )
+        print(f"verify sf={args.scale} seed={args.seed} failed={failed} -> {args.out}")
+        sys.exit(1 if failed else 0)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def cmd_legacy_queries(args: argparse.Namespace) -> None:
+    from benchbox.core.expected_results.ssb_results import ssb_expected_row_counts
+
+    expected = ssb_expected_row_counts(args.scale)
+    print(json.dumps(expected))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name, handler in [("legacy", cmd_legacy), ("library", cmd_library)]:
+        command = sub.add_parser(name)
+        command.add_argument("--scale", type=float, required=True)
+        command.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
+        command.add_argument("--workdir", required=True)
+        command.add_argument("--out", required=True)
+        command.set_defaults(handler=handler)
+    command = sub.add_parser("compare")
+    command.add_argument("--legacy", required=True)
+    command.add_argument("--library", required=True)
+    command.add_argument("--out", required=True)
+    command.set_defaults(handler=cmd_compare)
+    command = sub.add_parser("verify")
+    command.add_argument("--scale", type=float, required=True)
+    command.add_argument("--seed", type=int, default=42)
+    command.add_argument("--workdir", required=True)
+    command.add_argument("--out", required=True)
+    command.set_defaults(handler=cmd_verify)
+    args = parser.parse_args()
+    args.handler(args)
+
+
+if __name__ == "__main__":
+    main()

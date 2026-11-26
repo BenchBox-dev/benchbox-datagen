@@ -12,18 +12,22 @@ import time
 from pathlib import Path
 
 BUDGETS = {
-    (1.0, "tbl"): (3.0, 1536),
-    (1.0, "parquet"): (4.0, 1536),
-    (10.0, "tbl"): (30.0, 2048),
-    (10.0, "parquet"): (40.0, 2048),
+    ("tpch", 1.0, "tbl"): (3.0, 1536),
+    ("tpch", 1.0, "parquet"): (4.0, 1536),
+    ("tpch", 10.0, "tbl"): (30.0, 2048),
+    ("tpch", 10.0, "parquet"): (40.0, 2048),
+    ("ssb", 1.0, "tbl"): (5.0, 512),
+    ("ssb", 1.0, "parquet"): (6.0, 512),
+    ("ssb", 10.0, "tbl"): (50.0, 1024),
+    ("ssb", 10.0, "parquet"): (60.0, 1024),
 }
 
 CHILD = """
 import json, resource, sys, time
 import benchbox_datagen
-scale, fmt, out, threads = float(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+benchmark, scale, fmt, out, threads = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
 start = time.monotonic()
-stats = benchbox_datagen.write_tables("tpch", scale, out, format=fmt, threads=None if threads == "default" else int(threads))
+stats = benchbox_datagen.write_tables(benchmark, scale, out, format=fmt, threads=None if threads == "default" else int(threads))
 wall = time.monotonic() - start
 peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 if sys.platform != "darwin":
@@ -32,11 +36,11 @@ print(json.dumps({"wall_s": wall, "peak_rss_mib": peak / (1 << 20), "rows": sum(
 """
 
 
-def measure(scale: float, fmt: str, threads: str, workdir: Path) -> dict[str, float]:
+def measure(benchmark: str, scale: float, fmt: str, threads: str, workdir: Path) -> dict[str, float]:
     out = Path(tempfile.mkdtemp(prefix="bench-", dir=workdir))
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", CHILD, str(scale), fmt, str(out), threads],
+            [sys.executable, "-c", CHILD, benchmark, str(scale), fmt, str(out), threads],
             check=True,
             capture_output=True,
             text=True,
@@ -48,6 +52,7 @@ def measure(scale: float, fmt: str, threads: str, workdir: Path) -> dict[str, fl
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--benchmark", choices=["tpch", "ssb"], default="tpch")
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--scales", type=float, nargs="+", default=[1.0, 10.0])
     parser.add_argument("--formats", nargs="+", default=["tbl", "parquet"])
@@ -61,6 +66,7 @@ def main() -> int:
             "cpus": os.cpu_count(),
             "loadavg_start": os.getloadavg(),
         },
+        "benchmark": args.benchmark,
         "threads": args.threads,
         "results": [],
     }
@@ -68,8 +74,8 @@ def main() -> int:
     for scale in args.scales:
         for fmt in args.formats:
             load_before = os.getloadavg()
-            runs = [measure(scale, fmt, args.threads, Path(args.workdir)) for _ in range(args.runs)]
-            wall_budget, rss_budget = BUDGETS[(scale, fmt)]
+            runs = [measure(args.benchmark, scale, fmt, args.threads, Path(args.workdir)) for _ in range(args.runs)]
+            wall_budget, rss_budget = BUDGETS[(args.benchmark, scale, fmt)]
             wall = statistics.median(run["wall_s"] for run in runs)
             rss = statistics.median(run["peak_rss_mib"] for run in runs)
             met = wall <= wall_budget and max(run["peak_rss_mib"] for run in runs) <= rss_budget
