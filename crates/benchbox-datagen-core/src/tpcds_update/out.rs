@@ -53,6 +53,11 @@ impl Out {
         self.fields += 1;
     }
 
+    pub(super) fn empty(&mut self) -> &mut Self {
+        self.separator();
+        self
+    }
+
     pub(super) fn text(&mut self, value: &str) -> &mut Self {
         self.separator();
         self.line.push_str(value);

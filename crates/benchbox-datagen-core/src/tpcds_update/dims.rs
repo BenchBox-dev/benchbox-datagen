@@ -11,10 +11,10 @@ use tpcdsgen::distribution::{
 };
 use tpcdsgen::permutations::make_permutation;
 use tpcdsgen::random::RandomValueGenerator;
-use tpcdsgen::row::{CatalogPageRowGenerator, PromotionRowGenerator, WarehouseRowGenerator};
+use tpcdsgen::nulls::create_null_bit_map;
 use tpcdsgen::types::{Address, Decimal};
 
-use super::calendar::{TODAYS_DATE, dttoj};
+use super::calendar::{DATA_START_DATE, TODAYS_DATE, dttoj};
 use super::columns::*;
 use super::ctx::Ctx;
 use super::out::Out;
@@ -112,14 +112,6 @@ fn make_address(ctx: &mut Ctx, scaling: &tpcdsgen::config::Scaling) -> Address {
     )
 }
 
-fn upstream_session(scale: f64) -> tpcdsgen::config::Session {
-    SessionBuilder::new()
-        .with_scale_factor(scale.max(1.0))
-        .with_compat_mode(CompatMode::C)
-        .build()
-        .expect("scale factor is positive")
-}
-
 pub(super) fn write_dimensions(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats>, Error> {
     let update = ctx.plan.update;
     let mut stats = Vec::new();
@@ -160,19 +152,32 @@ fn write_customer_address(
 }
 
 fn write_catalog_page(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, Error> {
+    const CATALOGS_PER_YEAR: i64 = 18;
     let mut out = Out::create(dir, "s_catalog_page", update)?;
-    let rows = source_table_rows("s_catalog_page", ctx.scale);
-    let generator = CatalogPageRowGenerator::new(upstream_session(ctx.scale), rows as u64);
-    for row in generator {
-        out.int(row.get_cp_catalog_number())
-            .int(row.get_cp_catalog_page_number())
-            .text(row.get_cp_department())
-            .text(row.get_cp_catalog_page_id())
-            .date(row.get_cp_start_date_id() as i32)
-            .date(row.get_cp_end_date_id() as i32)
-            .text(row.get_cp_description())
-            .text(row.get_cp_type())
+    let per_catalog = ctx.pages_per_catalog();
+    for index in 1..=source_table_rows("s_catalog_page", ctx.scale) {
+        ctx.rng.next(CP_NULLS);
+        let catalog = (index - 1) / per_catalog + 1;
+        let page = (index - 1) % per_catalog + 1;
+        let interval = (catalog - 1) % CATALOGS_PER_YEAR;
+        let (kind, duration, offset) = match interval {
+            0 | 1 => ("bi-annual", 182, interval * 182),
+            2..=5 => ("quarterly", 91, (interval - 2) * 91),
+            _ => ("monthly", 30, (interval - 6) * 30),
+        };
+        let start = i64::from(DATA_START_DATE) + offset + ((catalog - 1) / CATALOGS_PER_YEAR) * 365;
+        let end = start + duration - 1;
+        let description = ctx.gen_text(CP_DESCRIPTION, 50, 99);
+        out.int(catalog as i32)
+            .int(page as i32)
+            .text("DEPARTMENT")
+            .id(index)
+            .date(start as i32)
+            .date(end as i32)
+            .text(&description)
+            .text(kind)
             .end()?;
+        ctx.rng.row_stop(TABLE_CATALOG_PAGE);
     }
     out.finish()
 }
@@ -323,31 +328,92 @@ pub(super) fn make_word(source: i64, max_chars: usize) -> String {
     word
 }
 
+fn is_null(map: i64, span: Span, column: Col) -> bool {
+    (map >> (column.number - span.first)) & 1 == 1
+}
+
 fn write_promotion(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, Error> {
     let mut out = Out::create(dir, "s_promotion", update)?;
     let rows = source_table_rows("s_promotion", ctx.scale);
     let permutation = make_permutation(ctx.ids("promotion") as usize, ctx.rng.stream(S_PROMOTION_ID));
-    let generator = PromotionRowGenerator::new(upstream_session(ctx.scale), rows as u64);
-    for (index, row) in generator.enumerate() {
+    let details = ctx.text;
+    for index in 0..rows as usize {
         let id = i64::from(permutation[index]) + 1;
-        out.id(id)
-            .text(&make_word(id, 5))
-            .date(row.get_p_start_date_id() as i32)
-            .date(row.get_p_end_date_id() as i32)
-            .decimal(&row.get_p_cost())
-            .int(row.get_p_response_target())
-            .flag(row.get_p_channel_dmail())
-            .flag(row.get_p_channel_email())
-            .flag(row.get_p_channel_catalog())
-            .flag(row.get_p_channel_tv())
-            .flag(row.get_p_channel_radio())
-            .flag(row.get_p_channel_press())
-            .flag(row.get_p_channel_event())
-            .flag(row.get_p_channel_demo())
-            .text(row.get_p_channel_details())
-            .text(row.get_p_purpose())
-            .flag(row.get_p_discount_active())
-            .end()?;
+        let nulls = create_null_bit_map(UpstreamTable::Promotion, ctx.rng.stream(P_NULLS));
+        let null = |column: Col| is_null(nulls, TABLE_PROMOTION, column);
+        let start = DATA_START_DATE + ctx.rng.int(P_START_DATE_ID, -720, 100);
+        let end = start + ctx.rng.int(P_END_DATE_ID, 1, 60);
+        ctx.join_scd(P_ITEM_SK, "item");
+        let name = make_word(id, 5);
+        let mut flags = ctx.rng.int(P_CHANNEL_DMAIL, 0, 511);
+        let mut channels = [false; 9];
+        for channel in &mut channels {
+            *channel = flags & 1 == 1;
+            flags <<= 1;
+        }
+        let detail = details.random_text(20, 60, ctx.rng.stream(P_CHANNEL_DETAILS));
+        ctx.rng.next(P_PURPOSE);
+        let cost = Decimal::new(100_000, 2);
+        let channel_columns = [
+            P_CHANNEL_DMAIL,
+            P_CHANNEL_EMAIL,
+            P_CHANNEL_CATALOG,
+            P_CHANNEL_TV,
+            P_CHANNEL_RADIO,
+            P_CHANNEL_PRESS,
+            P_CHANNEL_EVENT,
+            P_CHANNEL_DEMO,
+        ];
+        if null(P_PROMO_ID) {
+            out.empty();
+        } else {
+            out.id(id);
+        }
+        if null(P_PROMO_NAME) {
+            out.empty();
+        } else {
+            out.text(&name);
+        }
+        if null(P_START_DATE_ID) {
+            out.empty().empty();
+        } else {
+            out.date(start).date(end);
+        }
+        if null(P_COST) {
+            out.empty();
+        } else {
+            out.decimal(&cost);
+        }
+        if null(P_RESPONSE_TARGET) {
+            out.empty();
+        } else {
+            out.int(1);
+        }
+        for (column, flag) in channel_columns.iter().zip(channels) {
+            if null(*column) {
+                out.empty();
+            } else {
+                out.flag(flag);
+            }
+        }
+        if null(P_CHANNEL_DETAILS) {
+            out.empty();
+        } else {
+            out.text(&detail);
+        }
+        if null(P_PURPOSE) {
+            out.empty();
+        } else {
+            out.text("Unknown");
+        }
+        if null(P_DISCOUNT_ACTIVE) {
+            out.empty();
+        } else {
+            out.flag(channels[8]);
+        }
+        out.end()?;
+        ctx.rng.row_stop(TABLE_S_PROMOTION);
+        ctx.rng.row_stop(TABLE_PROMOTION);
     }
     out.finish()
 }
@@ -356,13 +422,28 @@ fn write_warehouse(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, 
     let mut out = Out::create(dir, "s_warehouse", update)?;
     let rows = source_table_rows("s_warehouse", ctx.scale);
     let permutation = make_permutation(ctx.ids("warehouse") as usize, ctx.rng.stream(S_WRHS_ID));
-    let generator = WarehouseRowGenerator::new(upstream_session(ctx.scale), rows as u64);
-    for (index, row) in generator.enumerate() {
+    for index in 0..rows as usize {
         let id = i64::from(permutation[index]) + 1;
-        out.id(id)
-            .text(row.get_w_warehouse_name())
-            .int(row.get_w_warehouse_sq_ft())
-            .end()?;
+        let nulls = create_null_bit_map(UpstreamTable::Warehouse, ctx.rng.stream(W_NULLS));
+        let name = ctx.gen_text(W_WAREHOUSE_NAME, 10, 20);
+        let sq_ft = ctx.rng.int(W_WAREHOUSE_SQ_FT, 50_000, 1_000_000);
+        if is_null(nulls, TABLE_WAREHOUSE, W_WAREHOUSE_ID) {
+            out.empty();
+        } else {
+            out.id(id);
+        }
+        if is_null(nulls, TABLE_WAREHOUSE, W_WAREHOUSE_NAME) {
+            out.empty();
+        } else {
+            out.text(&name);
+        }
+        if is_null(nulls, TABLE_WAREHOUSE, W_WAREHOUSE_SQ_FT) {
+            out.empty();
+        } else {
+            out.int(sq_ft);
+        }
+        out.end()?;
+        ctx.rng.row_stop(TABLE_S_WAREHOUSE);
     }
     out.finish()
 }
@@ -464,7 +545,7 @@ const GMT_OFFSETS: [(i64, i32); 63] = [
 
 pub(super) fn write_zip_to_gmt(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats>, Error> {
     let mut out = Out::create(dir, "s_zip_to_gmt", ctx.plan.update)?;
-    for index in 1..=super::dims::zip_rows(ctx.scale) {
+    for index in 1..=source_table_rows("s_zip_to_gmt", ctx.scale) {
         let zip = index - 1;
         let offset = GMT_OFFSETS
             .iter()
@@ -476,11 +557,4 @@ pub(super) fn write_zip_to_gmt(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStat
         out.text(&format!("{zip:05}")).int(offset).end()?;
     }
     Ok(vec![out.finish()?])
-}
-
-pub(super) fn zip_rows(scale: f64) -> i64 {
-    if scale < 1.0 {
-        return ((100_000.0 * scale) as i64).max(1);
-    }
-    100_000
 }
