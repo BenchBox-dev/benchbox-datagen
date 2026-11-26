@@ -141,3 +141,10 @@ def test_parts_split_only_tables_with_a_million_or_more_source_rows(tmp_path):
     parts = [tmp_path / f"inventory.tbl.{part}" for part in (1, 2, 3)]
     joined = b"".join(path.read_bytes() for path in parts)
     assert joined == next(Path(s.path).read_bytes() for s in whole if s.table == "inventory")
+
+
+def test_delimited_output_matches_the_committed_dsdgen_hashes(tmp_path):
+    golden = json.loads((DATA / "tpcds_dsdgen_sha256.json").read_text())
+    for scale, expected in golden.items():
+        stats = benchbox_datagen.write_tables("tpcds", float(scale), tmp_path / scale, format="tbl")
+        assert {stat.table: sha256(stat.path) for stat in stats} == expected, scale
