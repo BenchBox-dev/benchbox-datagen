@@ -1,5 +1,7 @@
+import _thread
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 import pyarrow as pa
@@ -133,9 +135,9 @@ def test_parts_write_one_file_per_part_except_nation_and_region(tmp_path):
         files = [s for s in stats if s.table == table]
         assert len(files) == (1 if table in ("nation", "region") else 3)
         assert sum(s.rows for s in files) == counts[table]
-    assert (tmp_path / "lineitem.2.tbl").exists()
+    assert (tmp_path / "lineitem.tbl.2").exists()
     whole = benchbox_datagen.write_tables("tpch", 0.01, tmp_path / "whole", format="tbl")
-    joined = b"".join((tmp_path / f"lineitem.{p}.tbl").read_bytes() for p in (1, 2, 3))
+    joined = b"".join((tmp_path / f"lineitem.tbl.{p}").read_bytes() for p in (1, 2, 3))
     assert joined == next(Path(s.path).read_bytes() for s in whole if s.table == "lineitem")
 
 
@@ -159,3 +161,14 @@ def test_write_tables_reports_unwritable_destinations_as_os_errors(tmp_path):
     blocker.write_text("x")
     with pytest.raises(OSError):
         benchbox_datagen.write_tables("tpch", 0.01, blocker / "out")
+
+
+def test_a_keyboard_interrupt_stops_a_long_write_and_removes_partial_files(tmp_path):
+    timer = threading.Timer(0.3, _thread.interrupt_main)
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            benchbox_datagen.write_tables("tpch", 3.0, tmp_path, format="tbl", threads=1)
+    finally:
+        timer.cancel()
+    assert list(tmp_path.iterdir()) == []

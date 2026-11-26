@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
+use std::time::Duration;
+
+const CANCEL_POLL: Duration = Duration::from_millis(25);
 use std::thread;
 
 struct State<T, E> {
@@ -46,6 +50,8 @@ pub(crate) fn ordered<T: Send, E: Send>(
     jobs: usize,
     workers: usize,
     window: usize,
+    cancel: &AtomicBool,
+    cancelled: impl Fn() -> E,
     produce: impl Fn(usize) -> Result<T, E> + Sync,
     mut consume: impl FnMut(T) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -107,10 +113,17 @@ pub(crate) fn ordered<T: Send, E: Send>(
                     if state.aborted {
                         break None;
                     }
+                    if cancel.load(Ordering::Relaxed) {
+                        state.failure.get_or_insert_with(&cancelled);
+                        state.aborted = true;
+                        shared.changed.notify_all();
+                        break None;
+                    }
                     state = shared
                         .changed
-                        .wait(state)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        .wait_timeout(state, CANCEL_POLL)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .0;
                 }
             };
             let Some(value) = value else { break };
@@ -140,6 +153,8 @@ mod tests {
                 50,
                 workers,
                 4,
+                &AtomicBool::new(false),
+                || (),
                 |job| {
                     if job % 7 == 0 {
                         thread::sleep(std::time::Duration::from_millis(2));
@@ -162,6 +177,8 @@ mod tests {
             100,
             4,
             4,
+            &AtomicBool::new(false),
+            || "cancelled",
             |job| if job == 10 { Err("boom") } else { Ok(job) },
             |_| Ok(()),
         );
@@ -170,7 +187,29 @@ mod tests {
 
     #[test]
     fn a_consumer_failure_stops_the_run() {
-        let result = ordered(100, 4, 4, Ok::<_, &str>, |_| Err("full"));
+        let result = ordered(
+            100,
+            4,
+            4,
+            &AtomicBool::new(false),
+            || "cancelled",
+            Ok::<_, &str>,
+            |_| Err("full"),
+        );
         assert_eq!(result, Err("full"));
+    }
+
+    #[test]
+    fn a_set_cancel_flag_stops_the_run() {
+        let result = ordered(
+            100,
+            2,
+            2,
+            &AtomicBool::new(true),
+            || "cancelled",
+            Ok::<_, &str>,
+            |_| Ok(()),
+        );
+        assert_eq!(result, Err("cancelled"));
     }
 }

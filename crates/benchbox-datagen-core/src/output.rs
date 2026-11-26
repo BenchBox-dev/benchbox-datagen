@@ -1,13 +1,14 @@
 use std::fmt::Display;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use arrow::record_batch::RecordBatch;
-use benchbox_datagen_writers::{Compression, ParquetTableWriter};
+use benchbox_datagen_writers::{Compression, Error as WriterError, ParquetTableWriter};
 
 use crate::{Benchmark, Error, conformed, pipeline, tpch, validate_scale_factor};
 
@@ -57,18 +58,65 @@ pub struct FileStats {
     pub bytes: u64,
 }
 
+const MAX_BUFFERED_THREADS: usize = 8;
+const MAX_WORKERS: usize = 16;
+
 fn io_error(path: &Path, error: impl Display) -> Error {
     Error::Write(format!("{}: {error}", path.display()))
+}
+
+fn encode_error(path: &Path, error: impl Display) -> Error {
+    Error::Encode(format!("{}: {error}", path.display()))
+}
+
+fn writer_error(path: &Path, error: WriterError) -> Error {
+    match error {
+        WriterError::Io(error) => io_error(path, error),
+        other => encode_error(path, other),
+    }
 }
 
 fn file_path(dir: &Path, table: &str, part: Option<i32>, format: Format) -> PathBuf {
     match part {
         None => dir.join(format!("{table}.{}", format.name())),
-        Some(part) => dir.join(format!("{table}.{part}.{}", format.name())),
+        Some(part) => dir.join(format!("{table}.{}.{part}", format.name())),
+    }
+}
+
+struct Cancellable<'a, W> {
+    inner: W,
+    cancel: &'a AtomicBool,
+}
+
+impl<W: Write> Write for Cancellable<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 
 pub fn write_benchmark(request: &OutputRequest) -> Result<Vec<FileStats>, Error> {
+    write_benchmark_cancellable(request, &AtomicBool::new(false))
+}
+
+pub fn write_benchmark_cancellable(
+    request: &OutputRequest,
+    cancel: &AtomicBool,
+) -> Result<Vec<FileStats>, Error> {
+    write_with(request, cancel, None)
+}
+
+fn write_with(
+    request: &OutputRequest,
+    cancel: &AtomicBool,
+    chunk_rows: Option<u64>,
+) -> Result<Vec<FileStats>, Error> {
     validate_scale_factor(request.scale_factor)?;
     if request.parts < 1 {
         return Err(Error::InvalidParts(request.parts));
@@ -92,26 +140,52 @@ pub fn write_benchmark(request: &OutputRequest) -> Result<Vec<FileStats>, Error>
         scale_factor: request.scale_factor,
         format: request.format,
         compression,
-        threads,
+        workers: threads.min(MAX_WORKERS),
+        buffered: threads.min(MAX_BUFFERED_THREADS),
+        chunk_rows,
+        cancel,
         dir: &request.output_dir,
     };
     let mut stats = Vec::new();
-    for table in request.benchmark.tables() {
-        let split = request.parts > 1 && !matches!(*table, "nation" | "region");
-        if split {
-            job.write_parts(table, request.parts, &mut stats)?;
-        } else {
-            stats.push(job.write_single(table)?);
+    let outcome = (|| {
+        for table in request.benchmark.tables() {
+            let split = request.parts > 1 && !matches!(*table, "nation" | "region");
+            if split {
+                job.write_parts(table, request.parts, &mut stats)?;
+            } else {
+                stats.push(job.write_single(table)?);
+            }
+        }
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => Ok(stats),
+        Err(error) => {
+            for table in request.benchmark.tables() {
+                let _ =
+                    fs::remove_file(file_path(&request.output_dir, table, None, request.format));
+                for part in 1..=request.parts {
+                    let path = file_path(&request.output_dir, table, Some(part), request.format);
+                    let _ = fs::remove_file(path);
+                }
+            }
+            Err(if cancel.load(Ordering::Relaxed) {
+                Error::Cancelled
+            } else {
+                error
+            })
         }
     }
-    Ok(stats)
 }
 
 struct TableJob<'a> {
     scale_factor: f64,
     format: Format,
     compression: Compression,
-    threads: usize,
+    workers: usize,
+    buffered: usize,
+    chunk_rows: Option<u64>,
+    cancel: &'a AtomicBool,
     dir: &'a Path,
 }
 
@@ -124,8 +198,10 @@ impl TableJob<'_> {
     ) -> Result<(), Error> {
         pipeline::ordered(
             parts as usize,
-            self.threads,
-            self.threads,
+            self.workers,
+            self.workers,
+            self.cancel,
+            || Error::Cancelled,
             |index| {
                 let part = index as i32 + 1;
                 let path = file_path(self.dir, table, Some(part), self.format);
@@ -153,8 +229,11 @@ impl TableJob<'_> {
         let file = File::create(path).map_err(|e| io_error(path, e))?;
         match self.format {
             Format::Tbl => {
-                let mut file = file;
-                tpch::write_delimited(table, self.scale_factor, part, parts, &mut file)
+                let mut sink = Cancellable {
+                    inner: file,
+                    cancel: self.cancel,
+                };
+                tpch::write_delimited(table, self.scale_factor, part, parts, &mut sink)
                     .map_err(|e| io_error(path, e))
             }
             Format::Parquet => {
@@ -165,13 +244,16 @@ impl TableJob<'_> {
                     self.compression,
                     1,
                 )
-                .map_err(|e| io_error(path, e))?;
+                .map_err(|e| writer_error(path, e))?;
                 for batch in reader {
+                    if self.cancel.load(Ordering::Relaxed) {
+                        return Err(Error::Cancelled);
+                    }
                     writer
-                        .write(batch.map_err(|e| io_error(path, e))?)
-                        .map_err(|e| io_error(path, e))?;
+                        .write(batch.map_err(|e| encode_error(path, e))?)
+                        .map_err(|e| writer_error(path, e))?;
                 }
-                let (mut sink, rows) = writer.finish().map_err(|e| io_error(path, e))?;
+                let (mut sink, rows) = writer.finish().map_err(|e| writer_error(path, e))?;
                 sink.flush().map_err(|e| io_error(path, e))?;
                 Ok(rows)
             }
@@ -180,18 +262,21 @@ impl TableJob<'_> {
 
     fn write_single(&self, table: &'static str) -> Result<FileStats, Error> {
         let path = file_path(self.dir, table, None, self.format);
-        let (driver_rows, chunk_rows) = tpch::chunk_driver_rows(table, self.scale_factor);
+        let (driver_rows, default_chunk_rows) = tpch::chunk_driver_rows(table, self.scale_factor);
+        let chunk_rows = self.chunk_rows.unwrap_or(default_chunk_rows).max(1);
         let chunks = driver_rows.div_ceil(chunk_rows).clamp(1, i32::MAX as u64) as i32;
         let file = File::create(&path).map_err(|e| io_error(&path, e))?;
-        let window = self.threads * 2;
+        let window = self.buffered * 2;
         let rows = match self.format {
             Format::Tbl => {
                 let mut file = file;
                 let mut rows = 0;
                 pipeline::ordered(
                     chunks as usize,
-                    self.threads,
+                    self.workers,
                     window,
+                    self.cancel,
+                    || Error::Cancelled,
                     |index| {
                         let mut bytes = Vec::new();
                         let rows = tpch::write_delimited(
@@ -217,26 +302,28 @@ impl TableJob<'_> {
                     BufWriter::new(file),
                     schema,
                     self.compression,
-                    self.threads,
+                    self.buffered,
                 )
-                .map_err(|e| io_error(&path, e))?;
+                .map_err(|e| writer_error(&path, e))?;
                 pipeline::ordered(
                     chunks as usize,
-                    self.threads,
+                    self.workers,
                     window,
+                    self.cancel,
+                    || Error::Cancelled,
                     |index| {
                         conformed(table, self.scale_factor, index as i32 + 1, chunks)
                             .collect::<Result<Vec<RecordBatch>, _>>()
-                            .map_err(|e| io_error(&path, e))
+                            .map_err(|e| encode_error(&path, e))
                     },
                     |batches: Vec<RecordBatch>| {
                         for batch in batches {
-                            writer.write(batch).map_err(|e| io_error(&path, e))?;
+                            writer.write(batch).map_err(|e| writer_error(&path, e))?;
                         }
                         Ok(())
                     },
                 )?;
-                let (mut sink, rows) = writer.finish().map_err(|e| io_error(&path, e))?;
+                let (mut sink, rows) = writer.finish().map_err(|e| writer_error(&path, e))?;
                 sink.flush().map_err(|e| io_error(&path, e))?;
                 rows
             }
@@ -411,7 +498,7 @@ mod tests {
             assert_eq!(parts.len(), if single { 1 } else { 3 }, "{table}");
             assert_eq!(parts.iter().map(|file| file.rows).sum::<u64>(), rows);
         }
-        assert!(dir.path().join("lineitem.2.parquet").exists());
+        assert!(dir.path().join("lineitem.parquet.2").exists());
     }
 
     #[test]
@@ -436,5 +523,53 @@ mod tests {
             "csv".parse::<Format>(),
             Err(Error::UnknownFormat(_))
         ));
+    }
+
+    #[test]
+    fn part_files_follow_the_table_format_part_naming() {
+        let dir = tempfile::tempdir().unwrap();
+        write_benchmark(&request(dir.path(), Format::Tbl, 2, 3, 0.01)).unwrap();
+        for part in 1..=3 {
+            assert!(dir.path().join(format!("lineitem.tbl.{part}")).exists());
+        }
+        assert!(dir.path().join("nation.tbl").exists());
+    }
+
+    #[test]
+    fn multi_chunk_output_equals_single_chunk_output() {
+        for format in [Format::Tbl, Format::Parquet] {
+            for threads in [1, 4] {
+                let (single, many) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+                let request = request(single.path(), format, threads, 1, 0.01);
+                let whole =
+                    write_with(&request, &AtomicBool::new(false), Some(u64::MAX / 2)).unwrap();
+                let mut chunked_request = request.clone();
+                chunked_request.output_dir = many.path().to_path_buf();
+                let chunked =
+                    write_with(&chunked_request, &AtomicBool::new(false), Some(97)).unwrap();
+                for (a, b) in whole.iter().zip(&chunked) {
+                    assert_eq!(a.table, b.table);
+                    assert_eq!(
+                        fs::read(&a.path).unwrap(),
+                        fs::read(&b.path).unwrap(),
+                        "{} {format:?} threads={threads}",
+                        a.table
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancelled_write_stops_and_leaves_no_files() {
+        for (format, parts) in [(Format::Tbl, 1), (Format::Parquet, 1), (Format::Tbl, 3)] {
+            let dir = tempfile::tempdir().unwrap();
+            let result = write_benchmark_cancellable(
+                &request(dir.path(), format, 2, parts, 0.01),
+                &AtomicBool::new(true),
+            );
+            assert_eq!(result, Err(Error::Cancelled));
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
     }
 }

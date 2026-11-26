@@ -71,7 +71,7 @@ compression=None, threads=None, parts=1)` writes one `<table>.<format>` file per
 table (`format` is `"parquet"` or `"tbl"`; Parquet compression is `"none"`,
 `"snappy"` (default), `"gzip"` or `"zstd"`; `.tbl` is uncompressed). With
 `parts > 1` each table except `nation` and `region` is split into
-`<table>.<part>.<format>` files. `threads=None` uses every available CPU.
+`<table>.<format>.<part>` files (for example `lineitem.tbl.3`, the same shard naming BenchBox uses). `threads=None` uses every available CPU.
 
 ## Layout
 

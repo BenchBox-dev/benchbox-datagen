@@ -12,7 +12,7 @@ use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
 pub use benchbox_datagen_writers::Compression;
-pub use output::{FileStats, Format, OutputRequest, write_benchmark};
+pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
 
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
 
@@ -38,6 +38,10 @@ pub enum Error {
     },
     #[error("{0}")]
     Write(String),
+    #[error("{0}")]
+    Encode(String),
+    #[error("generation was cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

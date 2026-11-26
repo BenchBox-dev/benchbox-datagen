@@ -1,14 +1,20 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use benchbox_datagen_core::{
     Benchmark, Error, FileStats, OutputRequest, TableRequest, record_batches, row_counts,
-    write_benchmark,
+    write_benchmark_cancellable,
 };
-use pyo3::exceptions::{PyOSError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_arrow::PyRecordBatchReader;
+
+const SIGNAL_POLL: Duration = Duration::from_millis(20);
 
 fn value_error(error: Error) -> PyErr {
     PyValueError::new_err(error.to_string())
@@ -130,12 +136,28 @@ fn write_tables(
         parts,
         output_dir,
     };
-    let stats = py
-        .detach(|| write_benchmark(&request))
-        .map_err(|error| match error {
-            Error::Write(message) => PyOSError::new_err(message),
-            other => value_error(other),
-        })?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let cancel = Arc::clone(&cancel);
+        thread::spawn(move || write_benchmark_cancellable(&request, &cancel))
+    };
+    while !worker.is_finished() {
+        py.detach(|| thread::sleep(SIGNAL_POLL));
+        if let Err(signal) = py.check_signals() {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = py.detach(|| worker.join());
+            return Err(signal);
+        }
+    }
+    let outcome = worker
+        .join()
+        .map_err(|_| PyRuntimeError::new_err("the writer thread panicked"))?;
+    let stats = outcome.map_err(|error| match error {
+        Error::Write(message) => PyOSError::new_err(message),
+        Error::Encode(message) => PyRuntimeError::new_err(message),
+        Error::Cancelled => PyRuntimeError::new_err(error.to_string()),
+        other => value_error(other),
+    })?;
     Ok(stats.into_iter().map(FileStat::from).collect())
 }
 
