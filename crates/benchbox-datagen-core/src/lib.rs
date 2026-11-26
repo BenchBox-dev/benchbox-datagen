@@ -1,3 +1,4 @@
+mod dsgen;
 mod generate;
 mod output;
 mod pipeline;
@@ -44,12 +45,6 @@ pub enum Error {
     Write(String),
     #[error("{0}")]
     Encode(String),
-    #[error("{benchmark} generation requires scale factor >= {minimum}, got {scale_factor}")]
-    ScaleFactorBelowMinimum {
-        benchmark: Benchmark,
-        minimum: f64,
-        scale_factor: f64,
-    },
     #[error("{0}")]
     RefreshUnsupported(String),
     #[error("generation was cancelled")]
@@ -129,7 +124,7 @@ pub fn row_counts(
     benchmark: Benchmark,
     scale_factor: f64,
 ) -> Result<Vec<(&'static str, u64)>, Error> {
-    validate_scale_factor(benchmark, scale_factor, false)?;
+    validate_scale_factor(scale_factor)?;
     Ok(generate::row_counts(benchmark, scale_factor))
 }
 
@@ -139,7 +134,7 @@ pub fn write_refresh_sets(
     sets: i32,
     output_dir: &std::path::Path,
 ) -> Result<Vec<FileStats>, Error> {
-    validate_scale_factor(benchmark, scale_factor, true)?;
+    validate_scale_factor(scale_factor)?;
     if sets < 1 {
         return Err(Error::RefreshUnsupported(format!(
             "sets must be at least 1, got {sets}"
@@ -155,29 +150,18 @@ pub fn write_refresh_sets(
 }
 
 pub fn table_scales(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<TableScale>, Error> {
-    validate_scale_factor(benchmark, scale_factor, false)?;
+    validate_scale_factor(scale_factor)?;
     Ok(generate::table_scales(benchmark, scale_factor))
 }
 
 pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
-    validate_scale_factor(benchmark, scale_factor, false)?;
+    validate_scale_factor(scale_factor)?;
     Ok(generate::key_ranges(benchmark, scale_factor))
 }
 
-pub(crate) fn validate_scale_factor(
-    benchmark: Benchmark,
-    scale_factor: f64,
-    generation: bool,
-) -> Result<(), Error> {
+pub(crate) fn validate_scale_factor(scale_factor: f64) -> Result<(), Error> {
     if !scale_factor.is_finite() || scale_factor <= 0.0 {
         return Err(Error::InvalidScaleFactor(scale_factor));
-    }
-    if generation && benchmark == Benchmark::Tpcds && scale_factor < tpcds::MIN_SCALE_FACTOR {
-        return Err(Error::ScaleFactorBelowMinimum {
-            benchmark,
-            minimum: tpcds::MIN_SCALE_FACTOR,
-            scale_factor,
-        });
     }
     Ok(())
 }
@@ -243,7 +227,7 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         part,
         parts,
     } = request;
-    validate_scale_factor(*benchmark, *scale_factor, true)?;
+    validate_scale_factor(*scale_factor)?;
     if *parts < 1 || *part < 1 || part > parts {
         return Err(Error::InvalidPart {
             part: *part,
@@ -449,18 +433,19 @@ mod tests {
     }
 
     #[test]
-    fn tpcds_generation_rejects_fractional_scale_factors_but_the_model_answers() {
+    fn tpcds_generation_accepts_fractional_scale_factors() {
         for scale_factor in [0.5, 0.01, 0.999] {
-            assert!(matches!(
-                record_batches(&TableRequest {
+            for table in ["item", "customer", "store_returns"] {
+                let mut reader = record_batches(&TableRequest {
                     benchmark: Benchmark::Tpcds,
-                    table: "item".into(),
+                    table: table.into(),
                     scale_factor,
                     part: 1,
                     parts: 1,
-                }),
-                Err(Error::ScaleFactorBelowMinimum { .. })
-            ));
+                })
+                .unwrap();
+                assert!(reader.next().unwrap().unwrap().num_rows() > 0);
+            }
             assert!(row_counts(Benchmark::Tpcds, scale_factor).is_ok());
             assert!(key_ranges(Benchmark::Tpcds, scale_factor).is_ok());
         }

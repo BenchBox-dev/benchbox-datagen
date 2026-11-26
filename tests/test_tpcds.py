@@ -59,11 +59,43 @@ def test_stream_schemas_equal_the_benchbox_converter_schemas():
 
 
 @pytest.mark.parametrize("scale", [0.01, 0.5, 0.999])
-def test_fractional_scale_factors_are_refused_for_generation(scale, tmp_path):
-    with pytest.raises(ValueError, match="generation requires scale factor >= 1"):
-        benchbox_datagen.generate_table("tpcds", "item", scale)
-    with pytest.raises(ValueError, match="generation requires scale factor >= 1"):
-        benchbox_datagen.write_tables("tpcds", scale, tmp_path)
+def test_fractional_scale_factors_generate_every_table(scale):
+    counts = benchbox_datagen.row_counts("tpcds", scale)
+    for table in TABLES:
+        data = pa.RecordBatchReader.from_stream(benchbox_datagen.generate_table("tpcds", table, scale)).read_all()
+        assert data.num_rows == counts[table], table
+
+
+def test_subscale_parquet_is_independent_of_threads_and_matches_the_stream(tmp_path):
+    runs = [
+        benchbox_datagen.write_tables("tpcds", 0.01, tmp_path / str(threads), threads=threads)
+        for threads in (1, 4, None)
+    ]
+    hashes = [[sha256(s.path) for s in run] for run in runs]
+    assert hashes[0] == hashes[1] == hashes[2]
+    counts = benchbox_datagen.row_counts("tpcds", 0.01)
+    for stat in runs[0]:
+        assert stat.rows == counts[stat.table], stat.table
+        streamed = pa.RecordBatchReader.from_stream(benchbox_datagen.generate_table("tpcds", stat.table, 0.01)).read_all()
+        assert pq.read_table(stat.path).equals(streamed), stat.table
+
+
+def test_subscale_foreign_keys_stay_inside_the_scaled_dimensions():
+    scale = 0.01
+    ranges = benchbox_datagen.key_ranges("tpcds", scale)
+    counts = benchbox_datagen.row_counts("tpcds", scale)
+    store_sales = pa.RecordBatchReader.from_stream(benchbox_datagen.generate_table("tpcds", "store_sales", scale)).read_all()
+    for column, dimension in [
+        ("ss_cdemo_sk", "customer_demographics"),
+        ("ss_addr_sk", "customer_address"),
+        ("ss_customer_sk", "customer"),
+        ("ss_promo_sk", "promotion"),
+        ("ss_store_sk", "store"),
+        ("ss_item_sk", "item"),
+    ]:
+        observed = pc.min_max(store_sales[column]).as_py()
+        assert 1 <= observed["min"] and observed["max"] <= counts[dimension], column
+    assert pc.min_max(store_sales["ss_ticket_number"]).as_py()["max"] == ranges["store_sales"]["ss_ticket_number"][1]
 
 
 def test_row_counts_equal_the_published_scale_factor_one_cardinalities():
