@@ -1,2 +1,1 @@
 glob	README.md
-glob	THIRD_PARTY_LICENSES

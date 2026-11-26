@@ -14,9 +14,5 @@
     ]
   },
   "dependencies": [],
-  "workflow_sha": "20d0d34b8f229cd06f0fc94a40658ac3f43567cc",
-  "matcher": {
-    "path": "_project/scripts/soundness_paths.py",
-    "sha256": "eab7c989245187504215795af169ed0cd6ba2006b8d2fac9ae4b25417283124c"
-  }
+  "workflow_sha": "20d0d34b8f229cd06f0fc94a40658ac3f43567cc"
 }
