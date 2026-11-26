@@ -1,0 +1,147 @@
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Int,
+    Decimal,
+    Date,
+    Text,
+}
+
+impl Kind {
+    fn data_type(self) -> DataType {
+        match self {
+            Kind::Int => DataType::Int64,
+            Kind::Decimal => DataType::Decimal128(15, 2),
+            Kind::Date => DataType::Date32,
+            Kind::Text => DataType::Utf8,
+        }
+    }
+}
+
+use Kind::{Date, Decimal, Int, Text};
+
+type Column = (&'static str, Kind, bool);
+
+const TPCH: [(&str, &[Column]); 8] = [
+    (
+        "nation",
+        &[
+            ("n_nationkey", Int, false),
+            ("n_name", Text, false),
+            ("n_regionkey", Int, false),
+            ("n_comment", Text, true),
+        ],
+    ),
+    (
+        "region",
+        &[
+            ("r_regionkey", Int, false),
+            ("r_name", Text, false),
+            ("r_comment", Text, true),
+        ],
+    ),
+    (
+        "part",
+        &[
+            ("p_partkey", Int, false),
+            ("p_name", Text, false),
+            ("p_mfgr", Text, false),
+            ("p_brand", Text, false),
+            ("p_type", Text, false),
+            ("p_size", Int, false),
+            ("p_container", Text, false),
+            ("p_retailprice", Decimal, false),
+            ("p_comment", Text, false),
+        ],
+    ),
+    (
+        "supplier",
+        &[
+            ("s_suppkey", Int, false),
+            ("s_name", Text, false),
+            ("s_address", Text, false),
+            ("s_nationkey", Int, false),
+            ("s_phone", Text, false),
+            ("s_acctbal", Decimal, false),
+            ("s_comment", Text, false),
+        ],
+    ),
+    (
+        "partsupp",
+        &[
+            ("ps_partkey", Int, false),
+            ("ps_suppkey", Int, false),
+            ("ps_availqty", Int, false),
+            ("ps_supplycost", Decimal, false),
+            ("ps_comment", Text, false),
+        ],
+    ),
+    (
+        "customer",
+        &[
+            ("c_custkey", Int, false),
+            ("c_name", Text, false),
+            ("c_address", Text, false),
+            ("c_nationkey", Int, false),
+            ("c_phone", Text, false),
+            ("c_acctbal", Decimal, false),
+            ("c_mktsegment", Text, false),
+            ("c_comment", Text, false),
+        ],
+    ),
+    (
+        "orders",
+        &[
+            ("o_orderkey", Int, false),
+            ("o_custkey", Int, false),
+            ("o_orderstatus", Text, false),
+            ("o_totalprice", Decimal, false),
+            ("o_orderdate", Date, false),
+            ("o_orderpriority", Text, false),
+            ("o_clerk", Text, false),
+            ("o_shippriority", Int, false),
+            ("o_comment", Text, false),
+        ],
+    ),
+    (
+        "lineitem",
+        &[
+            ("l_orderkey", Int, false),
+            ("l_partkey", Int, false),
+            ("l_suppkey", Int, false),
+            ("l_linenumber", Int, false),
+            ("l_quantity", Decimal, false),
+            ("l_extendedprice", Decimal, false),
+            ("l_discount", Decimal, false),
+            ("l_tax", Decimal, false),
+            ("l_returnflag", Text, false),
+            ("l_linestatus", Text, false),
+            ("l_shipdate", Date, false),
+            ("l_commitdate", Date, false),
+            ("l_receiptdate", Date, false),
+            ("l_shipinstruct", Text, false),
+            ("l_shipmode", Text, false),
+            ("l_comment", Text, false),
+        ],
+    ),
+];
+
+static TPCH_SCHEMAS: LazyLock<HashMap<&'static str, SchemaRef>> = LazyLock::new(|| {
+    TPCH.iter()
+        .map(|(table, columns)| {
+            let fields: Vec<Field> = columns
+                .iter()
+                .map(|(name, kind, nullable)| Field::new(*name, kind.data_type(), *nullable))
+                .collect();
+            (*table, Arc::new(Schema::new(fields)))
+        })
+        .collect()
+});
+
+pub(crate) fn tpch(table: &str) -> Option<SchemaRef> {
+    TPCH_SCHEMAS.get(table).cloned()
+}

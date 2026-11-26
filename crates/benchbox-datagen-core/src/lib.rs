@@ -1,15 +1,18 @@
+mod output;
+mod pipeline;
+mod schema;
+mod tpch;
+
 use std::fmt;
 use std::str::FromStr;
 
-use arrow::record_batch::{RecordBatchIterator, RecordBatchReader};
-use tpchgen::generators::{
-    CustomerGenerator, LineItemGenerator, NationGenerator, OrderGenerator, PartGenerator,
-    PartSuppGenerator, RegionGenerator, SupplierGenerator,
-};
-use tpchgen_arrow::{
-    CustomerArrow, LineItemArrow, NationArrow, OrderArrow, PartArrow, PartSuppArrow, RegionArrow,
-    SupplierArrow,
-};
+use arrow::compute::cast;
+use arrow::datatypes::SchemaRef;
+use arrow::error::ArrowError;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
+
+pub use benchbox_datagen_writers::Compression;
+pub use output::{FileStats, Format, OutputRequest, write_benchmark};
 
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
 
@@ -24,6 +27,17 @@ pub enum Error {
     InvalidScaleFactor(f64),
     #[error("part must be between 1 and parts ({parts}), got {part}")]
     InvalidPart { part: i32, parts: i32 },
+    #[error("parts must be at least 1, got {0}")]
+    InvalidParts(i32),
+    #[error("unknown output format {0:?}; supported: tbl, parquet")]
+    UnknownFormat(String),
+    #[error("{format:?} output does not support {compression} compression", format = format.name())]
+    UnsupportedCompression {
+        format: Format,
+        compression: &'static str,
+    },
+    #[error("{0}")]
+    Write(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +53,17 @@ impl Benchmark {
         match self {
             Benchmark::Tpch => "tpch",
         }
+    }
+
+    pub fn table(self, name: &str) -> Result<&'static str, Error> {
+        self.tables()
+            .iter()
+            .copied()
+            .find(|table| table.eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::UnknownTable {
+                benchmark: self,
+                table: name.to_owned(),
+            })
     }
 
     pub fn tables(self) -> &'static [&'static str] {
@@ -77,6 +102,83 @@ pub struct TableRequest {
     pub parts: i32,
 }
 
+pub fn table_schema(benchmark: Benchmark, table: &str) -> Result<SchemaRef, Error> {
+    let table = benchmark.table(table)?;
+    match benchmark {
+        Benchmark::Tpch => Ok(schema::tpch(table).expect("every TPC-H table has a schema")),
+    }
+}
+
+pub fn row_counts(
+    benchmark: Benchmark,
+    scale_factor: f64,
+) -> Result<Vec<(&'static str, u64)>, Error> {
+    validate_scale_factor(scale_factor)?;
+    match benchmark {
+        Benchmark::Tpch => Ok(benchmark
+            .tables()
+            .iter()
+            .map(|table| (*table, tpch::row_count(table, scale_factor)))
+            .collect()),
+    }
+}
+
+pub(crate) fn validate_scale_factor(scale_factor: f64) -> Result<(), Error> {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        Ok(())
+    } else {
+        Err(Error::InvalidScaleFactor(scale_factor))
+    }
+}
+
+pub(crate) struct Conformed {
+    inner: BatchReader,
+    schema: SchemaRef,
+}
+
+impl Conformed {
+    pub(crate) fn schema_ref(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl Iterator for Conformed {
+    type Item = Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let batch = match self.inner.next()? {
+            Ok(batch) => batch,
+            Err(error) => return Some(Err(error)),
+        };
+        let columns = batch
+            .columns()
+            .iter()
+            .zip(self.schema.fields())
+            .map(|(column, field)| {
+                if column.data_type() == field.data_type() {
+                    Ok(column.clone())
+                } else {
+                    cast(column, field.data_type())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>();
+        Some(columns.and_then(|columns| RecordBatch::try_new(self.schema.clone(), columns)))
+    }
+}
+
+impl RecordBatchReader for Conformed {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+pub(crate) fn conformed(table: &str, scale_factor: f64, part: i32, parts: i32) -> Conformed {
+    Conformed {
+        inner: tpch::batches(table, scale_factor, part, parts),
+        schema: schema::tpch(table).expect("every TPC-H table has a schema"),
+    }
+}
+
 pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
     let TableRequest {
         benchmark,
@@ -85,64 +187,23 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         part,
         parts,
     } = request;
-    let (scale_factor, part, parts) = (*scale_factor, *part, *parts);
-    if !scale_factor.is_finite() || scale_factor <= 0.0 {
-        return Err(Error::InvalidScaleFactor(scale_factor));
+    validate_scale_factor(*scale_factor)?;
+    if *parts < 1 || *part < 1 || part > parts {
+        return Err(Error::InvalidPart {
+            part: *part,
+            parts: *parts,
+        });
     }
-    if parts < 1 || part < 1 || part > parts {
-        return Err(Error::InvalidPart { part, parts });
-    }
-    let unknown_table = || Error::UnknownTable {
-        benchmark: *benchmark,
-        table: table.clone(),
-    };
+    let table = benchmark.table(table)?;
     match benchmark {
-        Benchmark::Tpch => Ok(match table.to_ascii_lowercase().as_str() {
-            "nation" if part > 1 => {
-                Box::new(RecordBatchIterator::new([], NationArrow::schema_ref()))
-            }
-            "region" if part > 1 => {
-                Box::new(RecordBatchIterator::new([], RegionArrow::schema_ref()))
-            }
-            "nation" => Box::new(NationArrow::new(NationGenerator::new(scale_factor, 1, 1))),
-            "region" => Box::new(RegionArrow::new(RegionGenerator::new(scale_factor, 1, 1))),
-            "part" => Box::new(PartArrow::new(PartGenerator::new(
-                scale_factor,
-                part,
-                parts,
-            ))),
-            "supplier" => Box::new(SupplierArrow::new(SupplierGenerator::new(
-                scale_factor,
-                part,
-                parts,
-            ))),
-            "partsupp" => Box::new(PartSuppArrow::new(PartSuppGenerator::new(
-                scale_factor,
-                part,
-                parts,
-            ))),
-            "customer" => Box::new(CustomerArrow::new(CustomerGenerator::new(
-                scale_factor,
-                part,
-                parts,
-            ))),
-            "orders" => Box::new(OrderArrow::new(OrderGenerator::new(
-                scale_factor,
-                part,
-                parts,
-            ))),
-            "lineitem" => Box::new(LineItemArrow::new(LineItemGenerator::new(
-                scale_factor,
-                part,
-                parts,
-            ))),
-            _ => return Err(unknown_table()),
-        }),
+        Benchmark::Tpch => Ok(Box::new(conformed(table, *scale_factor, *part, *parts))),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType;
+
     use super::*;
 
     fn request(table: &str, scale_factor: f64, part: i32, parts: i32) -> TableRequest {
@@ -217,5 +278,80 @@ mod tests {
                 Some(Error::InvalidPart { part, parts })
             );
         }
+    }
+
+    #[test]
+    fn schemas_use_benchbox_types_and_match_the_streams() {
+        for table in Benchmark::Tpch.tables() {
+            let schema = table_schema(Benchmark::Tpch, table).unwrap();
+            let batches = record_batches(&request(table, 0.01, 1, 1)).unwrap();
+            assert_eq!(batches.schema(), schema, "{table}");
+            for batch in batches {
+                assert_eq!(batch.unwrap().schema(), schema, "{table}");
+            }
+            for field in schema.fields() {
+                assert!(
+                    !matches!(
+                        field.data_type(),
+                        DataType::Int32 | DataType::Utf8View | DataType::LargeUtf8
+                    ),
+                    "{table}.{}",
+                    field.name()
+                );
+                let nullable = matches!(field.name().as_str(), "n_comment" | "r_comment");
+                assert_eq!(field.is_nullable(), nullable, "{}", field.name());
+            }
+        }
+        let lineitem = table_schema(Benchmark::Tpch, "LINEITEM").unwrap();
+        assert_eq!(
+            lineitem.field_with_name("l_quantity").unwrap().data_type(),
+            &DataType::Decimal128(15, 2)
+        );
+        assert_eq!(
+            lineitem.field_with_name("l_shipdate").unwrap().data_type(),
+            &DataType::Date32
+        );
+        assert_eq!(
+            lineitem.field_with_name("l_orderkey").unwrap().data_type(),
+            &DataType::Int64
+        );
+    }
+
+    #[test]
+    fn row_counts_equal_the_generated_rows() {
+        let counts = row_counts(Benchmark::Tpch, 0.01).unwrap();
+        assert_eq!(
+            counts.iter().map(|(table, _)| *table).collect::<Vec<_>>(),
+            Benchmark::Tpch.tables()
+        );
+        for (table, rows) in counts {
+            assert_eq!(
+                rows as usize,
+                row_count(&request(table, 0.01, 1, 1)),
+                "{table}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_counts_match_the_published_scale_factor_one_cardinalities() {
+        let counts = row_counts(Benchmark::Tpch, 1.0).unwrap();
+        assert_eq!(
+            counts,
+            [
+                ("nation", 25),
+                ("region", 5),
+                ("part", 200_000),
+                ("supplier", 10_000),
+                ("partsupp", 800_000),
+                ("customer", 150_000),
+                ("orders", 1_500_000),
+                ("lineitem", 6_001_215),
+            ]
+        );
+        assert_eq!(
+            row_counts(Benchmark::Tpch, -1.0),
+            Err(Error::InvalidScaleFactor(-1.0))
+        );
     }
 }

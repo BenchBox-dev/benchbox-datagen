@@ -1,6 +1,13 @@
-use benchbox_datagen_core::{Benchmark, Error, TableRequest, record_batches};
-use pyo3::exceptions::PyValueError;
+use std::num::NonZeroUsize;
+use std::path::PathBuf;
+
+use benchbox_datagen_core::{
+    Benchmark, Error, FileStats, OutputRequest, TableRequest, record_batches, row_counts,
+    write_benchmark,
+};
+use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pyo3_arrow::PyRecordBatchReader;
 
 fn value_error(error: Error) -> PyErr {
@@ -58,11 +65,105 @@ fn table_names(benchmark: &str) -> PyResult<Vec<&'static str>> {
         .to_vec())
 }
 
+#[pyclass(frozen, module = "benchbox_datagen._native", get_all)]
+struct FileStat {
+    table: String,
+    path: String,
+    rows: u64,
+    bytes: u64,
+}
+
+#[pymethods]
+impl FileStat {
+    fn __repr__(&self) -> String {
+        format!(
+            "FileStat(table={:?}, path={:?}, rows={}, bytes={})",
+            self.table, self.path, self.rows, self.bytes
+        )
+    }
+}
+
+impl From<FileStats> for FileStat {
+    fn from(stats: FileStats) -> Self {
+        Self {
+            table: stats.table.to_owned(),
+            path: stats.path.to_string_lossy().into_owned(),
+            rows: stats.rows,
+            bytes: stats.bytes,
+        }
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (benchmark, scale_factor, output_dir, format = "parquet", compression = None, threads = None, parts = 1))]
+#[allow(clippy::too_many_arguments)]
+fn write_tables(
+    py: Python<'_>,
+    benchmark: &str,
+    scale_factor: f64,
+    output_dir: PathBuf,
+    format: &str,
+    compression: Option<&str>,
+    threads: Option<usize>,
+    parts: i32,
+) -> PyResult<Vec<FileStat>> {
+    let threads = match threads {
+        None => None,
+        Some(count) => Some(
+            NonZeroUsize::new(count)
+                .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))?,
+        ),
+    };
+    let request = OutputRequest {
+        benchmark: benchmark.parse().map_err(value_error)?,
+        scale_factor,
+        format: format.parse().map_err(value_error)?,
+        compression: compression
+            .map(|name| {
+                name.parse()
+                    .map_err(|error: benchbox_datagen_writers::Error| {
+                        PyValueError::new_err(error.to_string())
+                    })
+            })
+            .transpose()?,
+        threads,
+        parts,
+        output_dir,
+    };
+    let stats = py
+        .detach(|| write_benchmark(&request))
+        .map_err(|error| match error {
+            Error::Write(message) => PyOSError::new_err(message),
+            other => value_error(other),
+        })?;
+    Ok(stats.into_iter().map(FileStat::from).collect())
+}
+
+#[pyfunction(name = "row_counts")]
+fn row_counts_py<'py>(
+    py: Python<'py>,
+    benchmark: &str,
+    scale_factor: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
+    let counts = py
+        .detach(|| row_counts(benchmark, scale_factor))
+        .map_err(value_error)?;
+    let result = PyDict::new(py);
+    for (table, rows) in counts {
+        result.set_item(table, rows)?;
+    }
+    Ok(result)
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<TableStream>()?;
     module.add_function(wrap_pyfunction!(generate_table, module)?)?;
+    module.add_class::<FileStat>()?;
     module.add_function(wrap_pyfunction!(table_names, module)?)?;
+    module.add_function(wrap_pyfunction!(write_tables, module)?)?;
+    module.add_function(wrap_pyfunction!(row_counts_py, module)?)?;
     Ok(())
 }
