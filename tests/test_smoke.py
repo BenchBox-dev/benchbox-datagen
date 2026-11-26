@@ -11,13 +11,21 @@ def test_generate_table_streams_arrow_batches_through_the_pycapsule_interface():
     assert table.column_names == ["n_nationkey", "n_name", "n_regionkey", "n_comment"]
 
 
-def test_parts_cover_the_whole_table():
+@pytest.mark.parametrize("table", benchbox_datagen.table_names("tpch"))
+def test_parts_cover_each_table_exactly_once(table):
     def rows(part: int, parts: int) -> int:
         return pa.RecordBatchReader.from_stream(
-            benchbox_datagen.generate_table("tpch", "orders", 0.01, part, parts)
+            benchbox_datagen.generate_table("tpch", table, 0.01, part, parts)
         ).read_all().num_rows
 
-    assert sum(rows(part, 3) for part in (1, 2, 3)) == rows(1, 1) == 15_000
+    assert sum(rows(part, 3) for part in (1, 2, 3)) == rows(1, 1)
+
+
+def test_the_returned_object_exposes_only_the_arrow_stream_protocol():
+    stream = benchbox_datagen.generate_table("tpch", "region", 1.0)
+    assert hasattr(stream, "__arrow_c_stream__")
+    assert not hasattr(stream, "read_all")
+    assert not hasattr(stream, "__next__")
 
 
 def test_table_names_lists_every_tpch_table():

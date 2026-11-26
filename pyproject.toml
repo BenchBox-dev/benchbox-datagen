@@ -7,7 +7,7 @@ name = "benchbox-datagen"
 description = "Deterministic, high-throughput benchmark data generation for BenchBox"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES"]
 requires-python = ">=3.11"
 dynamic = ["version"]
 classifiers = [

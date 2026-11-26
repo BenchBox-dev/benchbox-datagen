@@ -5,7 +5,7 @@ members = ["crates/benchbox-datagen-core", "crates/benchbox-datagen-py"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/BenchBox-dev/benchbox-datagen"
 

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use arrow::record_batch::RecordBatchReader;
+use arrow::record_batch::{RecordBatchIterator, RecordBatchReader};
 use tpchgen::generators::{
     CustomerGenerator, LineItemGenerator, NationGenerator, OrderGenerator, PartGenerator,
     PartSuppGenerator, RegionGenerator, SupplierGenerator,
@@ -14,6 +14,7 @@ use tpchgen_arrow::{
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     #[error("unknown benchmark {0:?}; supported: {supported}", supported = Benchmark::ALL.map(|b| b.name()).join(", "))]
     UnknownBenchmark(String),
@@ -26,6 +27,7 @@ pub enum Error {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Benchmark {
     Tpch,
 }
@@ -96,16 +98,14 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
     };
     match benchmark {
         Benchmark::Tpch => Ok(match table.to_ascii_lowercase().as_str() {
-            "nation" => Box::new(NationArrow::new(NationGenerator::new(
-                scale_factor,
-                part,
-                parts,
-            ))),
-            "region" => Box::new(RegionArrow::new(RegionGenerator::new(
-                scale_factor,
-                part,
-                parts,
-            ))),
+            "nation" if part > 1 => {
+                Box::new(RecordBatchIterator::new([], NationArrow::schema_ref()))
+            }
+            "region" if part > 1 => {
+                Box::new(RecordBatchIterator::new([], RegionArrow::schema_ref()))
+            }
+            "nation" => Box::new(NationArrow::new(NationGenerator::new(scale_factor, 1, 1))),
+            "region" => Box::new(RegionArrow::new(RegionGenerator::new(scale_factor, 1, 1))),
             "part" => Box::new(PartArrow::new(PartGenerator::new(
                 scale_factor,
                 part,
@@ -180,11 +180,13 @@ mod tests {
 
     #[test]
     fn parts_partition_rows_without_overlap_or_loss() {
-        let whole = row_count(&request("orders", 0.01, 1, 1));
-        let split: usize = (1..=4)
-            .map(|part| row_count(&request("orders", 0.01, part, 4)))
-            .sum();
-        assert_eq!(split, whole);
+        for table in Benchmark::Tpch.tables() {
+            let whole = row_count(&request(table, 0.01, 1, 1));
+            let split: usize = (1..=4)
+                .map(|part| row_count(&request(table, 0.01, part, 4)))
+                .sum();
+            assert_eq!(split, whole, "{table}");
+        }
     }
 
     #[test]
