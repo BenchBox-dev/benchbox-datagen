@@ -122,7 +122,7 @@ def run_legacy(scale_factor: float, seed: int, workdir: Path) -> dict:
         started = time.monotonic()
         generator.generate_data()
         seconds = time.monotonic() - started
-        stats = table_stats(duckdb.connect(), tbl_sources(out))
+        stats = table_stats(duckdb.connect(config={"threads": 4, "memory_limit": "2GB"}), tbl_sources(out))
         return {"seed": seed, "generate_seconds": seconds, "tables": stats, "query_rows": query_row_counts(tbl_sources(out))}
     finally:
         shutil.rmtree(out, ignore_errors=True)
@@ -131,8 +131,16 @@ def run_legacy(scale_factor: float, seed: int, workdir: Path) -> dict:
 def cmd_legacy(args: argparse.Namespace) -> None:
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    runs = [run_legacy(args.scale, seed, workdir) for seed in args.seeds]
+    partial = Path(args.out + ".partial")
+    runs = json.loads(partial.read_text())["runs"] if partial.exists() else []
+    done = {run["seed"] for run in runs}
+    for seed in args.seeds:
+        if seed in done:
+            continue
+        runs.append(run_legacy(args.scale, seed, workdir))
+        partial.write_text(json.dumps({"scale": args.scale, "runs": runs}))
     Path(args.out).write_text(json.dumps({"scale": args.scale, "runs": runs}))
+    partial.unlink()
     print(f"legacy sf={args.scale} seeds={args.seeds} -> {args.out}")
 
 
@@ -344,11 +352,80 @@ def cmd_verify(args: argparse.Namespace) -> None:
         shutil.rmtree(out, ignore_errors=True)
 
 
-def cmd_legacy_queries(args: argparse.Namespace) -> None:
-    from benchbox.core.expected_results.ssb_results import ssb_expected_row_counts
+def load(path: Path) -> dict | None:
+    return json.loads(path.read_text()) if path.exists() else None
 
-    expected = ssb_expected_row_counts(args.scale)
-    print(json.dumps(expected))
+
+def sf_name(scale: float) -> str:
+    return f"{scale:g}"
+
+
+def cmd_report(args: argparse.Namespace) -> None:
+    from benchbox.core.expected_results.ssb_results import SSB_EXPECTED_ROW_COUNTS
+
+    base = Path(args.dir)
+    scales = [0.01, 0.1, 1.0, 10.0]
+    lines = ["### Row counts and referential integrity (seed 42)", ""]
+    lines += ["| SF | " + " | ".join(TABLES) + " | orphan FKs | duplicate keys | DuckDB = DataFusion on all 13 |", "|---|" + "---|" * (len(TABLES) + 3)]
+    for scale in scales:
+        verify = load(base / f"verify_{sf_name(scale)}.json")
+        if verify is None:
+            continue
+        counts = " | ".join(
+            f"{verify['rows'][t]['actual']:,}{'' if verify['rows'][t]['actual'] == verify['rows'][t]['expected'] else ' (EXPECTED ' + format(verify['rows'][t]['expected'], ',') + ')'}"
+            for t in TABLES
+        )
+        agree = all(q["agree"] for q in verify["queries"].values())
+        lines.append(
+            f"| {sf_name(scale)} | {counts} | {sum(verify['orphans'].values())} | {sum(verify['duplicates'].values())} | {'yes' if agree else 'NO'} |"
+        )
+    lines += ["", "### Distribution comparison with 5 legacy seeds (42-46)", ""]
+    lines += ["| SF | library seed | in legacy range | in 99.9% prediction interval | rank-equivalent quantile | outside |", "|---|---|---|---|---|---|"]
+    details = []
+    for scale in (0.1, 1.0):
+        compare = load(base / f"compare_{sf_name(scale)}.json")
+        if compare is None:
+            continue
+        for seed, data in compare["seeds"].items():
+            c = data["counts"]
+            lines.append(f"| {sf_name(scale)} | {seed} | {c['ok']} | {c['pi']} | {c['rank']} | {c['FAIL']} |")
+        for finding in compare["seeds"]["42"]["details"]:
+            details.append((scale, finding))
+    lines += ["", "Metrics for library seed 42 that are not inside the legacy min-max range:", ""]
+    lines += ["| SF | table.column | metric | library | legacy (5 seeds) | verdict |", "|---|---|---|---|---|---|"]
+    for scale, f in details:
+        legacy = f["legacy"]
+        shown = ", ".join(f"{v:.6g}" if isinstance(v, (int, float)) else str(v) for v in legacy) if isinstance(legacy, list) else str(legacy)
+        new = f"{f['new']:.6g}" if isinstance(f["new"], (int, float)) else str(f["new"])
+        lines.append(f"| {sf_name(scale)} | {f['table']}.{f['column']} | {f['metric']} | {new} | {shown} | {f['verdict']} |")
+    lines += ["", "### SSB queries (BenchBox query texts, default parameters)", ""]
+    for scale in scales:
+        verify = load(base / f"verify_{sf_name(scale)}.json")
+        if verify is None:
+            continue
+        legacy = load(base / f"legacy_{sf_name(scale)}.json")
+        library = load(base / f"library_{sf_name(scale)}.json")
+        lines += [f"SF {sf_name(scale)}", "", "| query | SSB_EXPECTED_ROW_COUNTS | legacy seeds 42-46 | library seeds 42-46 (DuckDB) | library seed 42 DuckDB | DataFusion | agree |", "|---|---|---|---|---|---|---|"]
+        expected = SSB_EXPECTED_ROW_COUNTS.get(scale, {})
+        for query_id, outcome in verify["queries"].items():
+            key = query_id.removeprefix("Q")
+            legacy_rows = [r["query_rows"][query_id] for r in legacy["runs"]] if legacy else "n/a"
+            library_rows = [r["query_rows"][query_id] for r in library["runs"]] if library else "n/a"
+            lines.append(
+                f"| {query_id} | {expected.get(key, 'n/a')} | {legacy_rows} | {library_rows} | {outcome['duckdb_rows']} | {outcome['datafusion_rows']} | {'yes' if outcome['agree'] else 'NO'} |"
+            )
+        lines.append("")
+    budgets = load(base / "budgets.json")
+    if budgets:
+        lines += ["### Budgets (N=3 medians, default threads)", ""]
+        lines += [f"Host CPUs {budgets['cpus']}, load average at start {budgets['loadavg_start']}.", ""]
+        lines += ["| SF | format | wall s (runs) | median wall s | budget s | peak RSS MiB (runs) | median RSS | budget MiB | load before / after | met |", "|---|---|---|---|---|---|---|---|---|---|"]
+        for r in budgets["results"]:
+            lines.append(
+                f"| {sf_name(r['scale'])} | {r['format']} | {r['runs_wall_s']} | {r['median_wall_s']} | {r['budget_wall_s']} | {r['runs_rss_mib']} | {r['median_rss_mib']} | {r['budget_rss_mib']} | {[round(x, 2) for x in r['loadavg_before']]} / {[round(x, 2) for x in r['loadavg_after']]} | {'yes' if r['met'] else 'NO'} |"
+            )
+    Path(args.out).write_text("\n".join(lines) + "\n")
+    print(f"report -> {args.out}")
 
 
 def main() -> None:
@@ -372,6 +449,10 @@ def main() -> None:
     command.add_argument("--workdir", required=True)
     command.add_argument("--out", required=True)
     command.set_defaults(handler=cmd_verify)
+    command = sub.add_parser("report")
+    command.add_argument("--dir", required=True)
+    command.add_argument("--out", required=True)
+    command.set_defaults(handler=cmd_report)
     args = parser.parse_args()
     args.handler(args)
 
