@@ -31,5 +31,9 @@ def write_tables(
     parts: int = 1,
 ) -> list[FileStat]: ...
 def write_refresh(
-    benchmark: str, scale_factor: float, output_dir: str | PathLike[str], sets: int = 1
+    benchmark: str,
+    scale_factor: float,
+    output_dir: str | PathLike[str],
+    sets: int = 1,
+    rng_seed: int | None = None,
 ) -> list[FileStat]: ...

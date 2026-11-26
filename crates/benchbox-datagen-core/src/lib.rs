@@ -4,6 +4,7 @@ mod pipeline;
 mod refresh;
 mod schema;
 mod tpcds;
+mod tpcds_update;
 mod tpch;
 
 use std::fmt;
@@ -137,20 +138,30 @@ pub fn write_refresh_sets(
     benchmark: Benchmark,
     scale_factor: f64,
     sets: i32,
+    rng_seed: Option<i32>,
     output_dir: &std::path::Path,
 ) -> Result<Vec<FileStats>, Error> {
-    validate_scale_factor(benchmark, scale_factor, true)?;
+    validate_scale_factor(benchmark, scale_factor, benchmark == Benchmark::Tpch)?;
     if sets < 1 {
         return Err(Error::RefreshUnsupported(format!(
             "sets must be at least 1, got {sets}"
         )));
     }
     match benchmark {
-        Benchmark::Tpch => refresh::write_tpch_refresh(scale_factor, sets, output_dir),
-        Benchmark::Tpcds => Err(Error::RefreshUnsupported(
-            "tpcds refresh sets are not available: tpcdsgen 4.0.0 has no update-set generators"
-                .into(),
-        )),
+        Benchmark::Tpch => {
+            if rng_seed.is_some() {
+                return Err(Error::RefreshUnsupported(
+                    "tpch refresh sets do not take an rng seed".into(),
+                ));
+            }
+            refresh::write_tpch_refresh(scale_factor, sets, output_dir)
+        }
+        Benchmark::Tpcds => tpcds_update::write_tpcds_refresh(
+            scale_factor,
+            sets,
+            rng_seed.unwrap_or(tpcds_update::DEFAULT_SEED),
+            output_dir,
+        ),
     }
 }
 
