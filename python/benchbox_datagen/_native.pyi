@@ -1,0 +1,6 @@
+from typing import Any
+
+__version__: str
+
+def generate_table(benchmark: str, table: str, scale_factor: float, part: int = 1, parts: int = 1) -> Any: ...
+def table_names(benchmark: str) -> list[str]: ...

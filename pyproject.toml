@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "benchbox-datagen"
+description = "Deterministic, high-throughput benchmark data generation for BenchBox"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Database",
+]
+
+[project.urls]
+Repository = "https://github.com/BenchBox-dev/benchbox-datagen"
+
+[dependency-groups]
+test = ["pyarrow>=19", "pytest>=8"]
+
+[tool.maturin]
+manifest-path = "crates/benchbox-datagen-py/Cargo.toml"
+module-name = "benchbox_datagen._native"
+python-source = "python"
+features = ["pyo3/extension-module"]
