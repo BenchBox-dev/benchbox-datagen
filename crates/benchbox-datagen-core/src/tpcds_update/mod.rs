@@ -6,6 +6,7 @@ mod orders;
 mod out;
 mod plan;
 mod rng;
+mod scd;
 
 use std::fs::{self, File};
 use std::io::Write;
