@@ -47,9 +47,9 @@ impl Stream {
     pub(crate) fn block(&self, index: u64) -> Draw {
         let mut state = mix(mix(self.base ^ self.seed) ^ index);
         let mut key = [0_u8; 32];
-        for word in key.chunks_exact_mut(8) {
+        for index in 0..4 {
             state = state.wrapping_add(GOLDEN_GAMMA);
-            word.copy_from_slice(&mix(state).to_le_bytes());
+            key[index * 8..index * 8 + 8].copy_from_slice(&mix(state).to_le_bytes());
         }
         Draw(ChaCha8Rng::from_seed(key))
     }
@@ -101,7 +101,7 @@ impl Draw {
             if index > 0 {
                 out.push_str(separator);
             }
-            out.push_str(self.pick(list));
+            out.push_str(self.pick::<&str>(list));
         }
     }
 }
