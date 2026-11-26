@@ -123,7 +123,7 @@ pub(crate) fn splittable(name: &str, scale_factor: f64) -> bool {
 pub(crate) fn chunk_source_rows(name: &str) -> u64 {
     match name {
         "store_sales" | "store_returns" | "catalog_sales" | "catalog_returns" | "web_sales"
-        | "web_returns" => 5_000,
+        | "web_returns" => 2_500,
         "inventory" => 250_000,
         _ => 50_000,
     }

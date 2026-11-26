@@ -59,7 +59,7 @@ pub struct FileStats {
     pub bytes: u64,
 }
 
-const MAX_BUFFERED_THREADS: usize = 8;
+const MAX_BUFFERED_THREADS: usize = 4;
 const MAX_WORKERS: usize = 16;
 
 fn io_error(path: &Path, error: impl Display) -> Error {

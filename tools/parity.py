@@ -12,6 +12,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 CHUNK = 1 << 22
+INTEGER_RENDERED = {"l_quantity"}
 
 
 def sha256_oracle(path: Path, strip: bool) -> str:
@@ -45,7 +46,7 @@ def sha256_parquet_as_text(path: Path) -> str:
     digest = hashlib.sha256()
     for batch in pq.ParquetFile(path).iter_batches(batch_size=1 << 16):
         columns = [
-            pc.cast(pc.cast(column, pa.int64()) if name == "l_quantity" else column, pa.string())
+            pc.cast(pc.cast(column, pa.int64()) if name in INTEGER_RENDERED or name.endswith("_gmt_offset") else column, pa.string())
             for name, column in zip(batch.schema.names, batch.columns)
         ]
         lines = pc.binary_join_element_wise(*columns, "|", options=JOIN_NULLS_AS_EMPTY)
