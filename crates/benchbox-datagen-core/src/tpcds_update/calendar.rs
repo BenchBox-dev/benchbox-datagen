@@ -57,7 +57,9 @@ impl Calendar {
     pub(super) fn weight(&self, entry: i32, set: usize) -> i32 {
         let sums = &self.cumulative[set - 1];
         let index = (entry - 1) as usize;
-        if index == 0 {
+        if index >= sums.len() {
+            0
+        } else if index == 0 {
             sums[0]
         } else {
             sums[index] - sums[index - 1]
