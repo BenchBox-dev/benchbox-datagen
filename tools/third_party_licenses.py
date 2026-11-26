@@ -53,6 +53,9 @@ def render() -> str:
 
 def main() -> int:
     text = render()
+    if any(entity in text for entity in ("&quot;", "&#x27;", "&lt;", "&gt;", "&amp;")):
+        print("licence text contains HTML entities; the template must not escape it", file=sys.stderr)
+        return 1
     if sys.argv[1:] == ["--check"]:
         if OUTPUT.read_text() != text:
             print("THIRD_PARTY_LICENSES is out of date; run python tools/third_party_licenses.py", file=sys.stderr)
