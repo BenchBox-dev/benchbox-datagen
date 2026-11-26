@@ -27,7 +27,11 @@ Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
 `NOT NULL` columns non-nullable). Delimited output is byte-identical to the
 bundled `dbgen` / `dsdgen -TERMINATE n` output (no trailing `|`), for every table.
-TPC-DS below scale factor 1 is refused until fractional scales are implemented.
+TPC-DS generation below scale factor 1 is refused: `tpcdsgen` 4.0.0 cannot take
+a caller-supplied scaling model, so 9 of the 24 tables cannot match the patched
+`dsdgen` byte for byte (`row_counts`, `key_ranges` and `table_scales` do follow the
+patched `dsdgen` sub-scale model). TPC-H refresh sets (`dbgen -U`) are available
+through `write_refresh`; TPC-DS refresh sets are not.
 Parquet output is written in Rust with 122,880-row row groups and the
 `benchbox.parquet_writer=benchbox-datagen-<major>` key-value entry; neither
 format's bytes depend on the thread count.

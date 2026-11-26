@@ -1,6 +1,7 @@
 mod generate;
 mod output;
 mod pipeline;
+mod refresh;
 mod schema;
 mod tpcds;
 mod tpch;
@@ -14,7 +15,7 @@ use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
 pub use benchbox_datagen_writers::Compression;
-pub use generate::KeyRange;
+pub use generate::{KeyRange, TableScale};
 pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
 
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
@@ -43,12 +44,14 @@ pub enum Error {
     Write(String),
     #[error("{0}")]
     Encode(String),
-    #[error("{benchmark} requires scale factor >= {minimum}, got {scale_factor}")]
+    #[error("{benchmark} generation requires scale factor >= {minimum}, got {scale_factor}")]
     ScaleFactorBelowMinimum {
         benchmark: Benchmark,
         minimum: f64,
         scale_factor: f64,
     },
+    #[error("{0}")]
+    RefreshUnsupported(String),
     #[error("generation was cancelled")]
     Cancelled,
 }
@@ -126,20 +129,50 @@ pub fn row_counts(
     benchmark: Benchmark,
     scale_factor: f64,
 ) -> Result<Vec<(&'static str, u64)>, Error> {
-    validate_scale_factor(benchmark, scale_factor)?;
+    validate_scale_factor(benchmark, scale_factor, false)?;
     Ok(generate::row_counts(benchmark, scale_factor))
 }
 
+pub fn write_refresh_sets(
+    benchmark: Benchmark,
+    scale_factor: f64,
+    sets: i32,
+    output_dir: &std::path::Path,
+) -> Result<Vec<FileStats>, Error> {
+    validate_scale_factor(benchmark, scale_factor, true)?;
+    if sets < 1 {
+        return Err(Error::RefreshUnsupported(format!(
+            "sets must be at least 1, got {sets}"
+        )));
+    }
+    match benchmark {
+        Benchmark::Tpch => refresh::write_tpch_refresh(scale_factor, sets, output_dir),
+        Benchmark::Tpcds => Err(Error::RefreshUnsupported(
+            "tpcds refresh sets are not available: tpcdsgen 4.0.0 has no update-set generators"
+                .into(),
+        )),
+    }
+}
+
+pub fn table_scales(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<TableScale>, Error> {
+    validate_scale_factor(benchmark, scale_factor, false)?;
+    Ok(generate::table_scales(benchmark, scale_factor))
+}
+
 pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
-    validate_scale_factor(benchmark, scale_factor)?;
+    validate_scale_factor(benchmark, scale_factor, false)?;
     Ok(generate::key_ranges(benchmark, scale_factor))
 }
 
-pub(crate) fn validate_scale_factor(benchmark: Benchmark, scale_factor: f64) -> Result<(), Error> {
+pub(crate) fn validate_scale_factor(
+    benchmark: Benchmark,
+    scale_factor: f64,
+    generation: bool,
+) -> Result<(), Error> {
     if !scale_factor.is_finite() || scale_factor <= 0.0 {
         return Err(Error::InvalidScaleFactor(scale_factor));
     }
-    if benchmark == Benchmark::Tpcds && scale_factor < tpcds::MIN_SCALE_FACTOR {
+    if generation && benchmark == Benchmark::Tpcds && scale_factor < tpcds::MIN_SCALE_FACTOR {
         return Err(Error::ScaleFactorBelowMinimum {
             benchmark,
             minimum: tpcds::MIN_SCALE_FACTOR,
@@ -210,7 +243,7 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         part,
         parts,
     } = request;
-    validate_scale_factor(*benchmark, *scale_factor)?;
+    validate_scale_factor(*benchmark, *scale_factor, true)?;
     if *parts < 1 || *part < 1 || part > parts {
         return Err(Error::InvalidPart {
             part: *part,
@@ -416,20 +449,8 @@ mod tests {
     }
 
     #[test]
-    fn tpcds_rejects_fractional_scale_factors() {
+    fn tpcds_generation_rejects_fractional_scale_factors_but_the_model_answers() {
         for scale_factor in [0.5, 0.01, 0.999] {
-            assert_eq!(
-                row_counts(Benchmark::Tpcds, scale_factor),
-                Err(Error::ScaleFactorBelowMinimum {
-                    benchmark: Benchmark::Tpcds,
-                    minimum: 1.0,
-                    scale_factor,
-                })
-            );
-            assert!(matches!(
-                key_ranges(Benchmark::Tpcds, scale_factor),
-                Err(Error::ScaleFactorBelowMinimum { .. })
-            ));
             assert!(matches!(
                 record_batches(&TableRequest {
                     benchmark: Benchmark::Tpcds,
@@ -440,7 +461,39 @@ mod tests {
                 }),
                 Err(Error::ScaleFactorBelowMinimum { .. })
             ));
+            assert!(row_counts(Benchmark::Tpcds, scale_factor).is_ok());
+            assert!(key_ranges(Benchmark::Tpcds, scale_factor).is_ok());
         }
+    }
+
+    #[test]
+    fn tpcds_subscale_model_matches_the_patched_dsdgen_row_counts() {
+        let scales = table_scales(Benchmark::Tpcds, 0.01).unwrap();
+        let find = |table: &str| *scales.iter().find(|scale| scale.table == table).unwrap();
+        assert_eq!(find("store").source_rows, 1);
+        assert_eq!(find("customer").source_rows, 1_000);
+        assert_eq!(find("customer_demographics").source_rows, 19_208);
+        assert_eq!(find("date_dim").source_rows, 73_049);
+        assert_eq!(find("store_sales").source_rows, 2_400);
+        assert_eq!(find("inventory").source_rows, 23_490);
+        let counts: std::collections::HashMap<_, _> = row_counts(Benchmark::Tpcds, 0.01)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(counts["store_sales"], 28_810);
+        assert_eq!(counts["store_returns"], 2_829);
+        let reasons: Vec<u64> = [0.01, 0.1, 0.5, 1.0]
+            .into_iter()
+            .map(|scale_factor| {
+                table_scales(Benchmark::Tpcds, scale_factor)
+                    .unwrap()
+                    .iter()
+                    .find(|scale| scale.table == "reason")
+                    .unwrap()
+                    .source_rows
+            })
+            .collect();
+        assert_eq!(reasons, [1, 7, 37, 75]);
     }
 
     #[test]

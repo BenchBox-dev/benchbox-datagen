@@ -59,14 +59,10 @@ def test_stream_schemas_equal_the_benchbox_converter_schemas():
 
 
 @pytest.mark.parametrize("scale", [0.01, 0.5, 0.999])
-def test_fractional_scale_factors_are_refused(scale, tmp_path):
-    with pytest.raises(ValueError, match="requires scale factor >= 1"):
+def test_fractional_scale_factors_are_refused_for_generation(scale, tmp_path):
+    with pytest.raises(ValueError, match="generation requires scale factor >= 1"):
         benchbox_datagen.generate_table("tpcds", "item", scale)
-    with pytest.raises(ValueError, match="requires scale factor >= 1"):
-        benchbox_datagen.row_counts("tpcds", scale)
-    with pytest.raises(ValueError, match="requires scale factor >= 1"):
-        benchbox_datagen.key_ranges("tpcds", scale)
-    with pytest.raises(ValueError, match="requires scale factor >= 1"):
+    with pytest.raises(ValueError, match="generation requires scale factor >= 1"):
         benchbox_datagen.write_tables("tpcds", scale, tmp_path)
 
 
@@ -148,3 +144,30 @@ def test_delimited_output_matches_the_committed_dsdgen_hashes(tmp_path):
     for scale, expected in golden.items():
         stats = benchbox_datagen.write_tables("tpcds", float(scale), tmp_path / scale, format="tbl")
         assert {stat.table: sha256(stat.path) for stat in stats} == expected, scale
+
+
+GATE = json.loads((DATA / "tpcds_rowcount_gate.json").read_text())
+
+
+@pytest.mark.parametrize("scale", list(GATE))
+def test_dsqgen_rowcount_inputs_equal_the_patched_dsdgen_values(scale):
+    scales = benchbox_datagen.table_scales("tpcds", float(scale))
+    expected = GATE[scale]
+    assert scales["store"]["id_count"] == expected["store"]
+    assert scales["call_center"]["id_count"] == expected["call_center"]
+    assert scales["reason"]["source_rows"] == expected["reason"]
+    assert scales["customer"]["source_rows"] == expected["customer"]
+    for table in ("store_sales", "web_sales", "catalog_sales"):
+        assert scales[table]["source_rows"] == expected[table], table
+
+
+def test_subscale_row_counts_use_the_proportional_model_with_a_one_row_floor():
+    counts = benchbox_datagen.row_counts("tpcds", 0.01)
+    assert counts["store"] == counts["call_center"] == counts["warehouse"] == 1
+    assert counts["customer_demographics"] == 19_208
+    assert counts["date_dim"] == 73_049
+    assert counts["store_sales"] == 28_810
+    assert counts["inventory"] == 23_490
+    assert benchbox_datagen.key_ranges("tpcds", 0.01)["customer"]["c_customer_sk"] == (1, 1_000)
+
+

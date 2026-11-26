@@ -101,10 +101,54 @@ pub(crate) fn table(name: &str) -> Table {
     }
 }
 
-pub(crate) fn source_rows(name: &str, scale_factor: f64) -> u64 {
+const STATIC_BELOW_ONE: [&str; 6] = [
+    "catalog_page",
+    "date_dim",
+    "household_demographics",
+    "income_band",
+    "ship_mode",
+    "time_dim",
+];
+
+fn upstream_rows(name: &str, scale_factor: f64) -> u64 {
     session(scale_factor)
         .get_scaling()
         .get_row_count(table(name))
+}
+
+fn history_ids(rows: u64) -> u64 {
+    let unique = (rows / 6) * 3;
+    match rows % 6 {
+        1 => unique + 1,
+        2 | 3 => unique + 2,
+        4 | 5 => unique + 3,
+        _ => unique,
+    }
+}
+
+pub(crate) fn source_rows(name: &str, scale_factor: f64) -> u64 {
+    if scale_factor >= MIN_SCALE_FACTOR {
+        return upstream_rows(name, scale_factor);
+    }
+    if name == "inventory" {
+        let weeks = upstream_rows("inventory", 1.0)
+            / (id_count("item", 1.0) * upstream_rows("warehouse", 1.0));
+        return id_count("item", scale_factor) * source_rows("warehouse", scale_factor) * weeks;
+    }
+    let base = upstream_rows(name, 1.0);
+    if STATIC_BELOW_ONE.contains(&name) {
+        return base;
+    }
+    (((base as f64) * scale_factor) as u64).max(1)
+}
+
+pub(crate) fn id_count(name: &str, scale_factor: f64) -> u64 {
+    let rows = source_rows(name, scale_factor);
+    if table(name).keeps_history() {
+        history_ids(rows)
+    } else {
+        rows
+    }
 }
 
 pub(crate) fn part_range(
@@ -167,7 +211,7 @@ macro_rules! dispatch {
             sink: &mut W,
         ) -> io::Result<u64> {
             let session = session(scale_factor);
-            let source_rows = session.get_scaling().get_row_count(table(name));
+            let source_rows = source_rows(name, scale_factor);
             match name {
                 $($name => {
                     let mut rows = $generator::new(session, source_rows);
@@ -184,7 +228,7 @@ macro_rules! dispatch {
             range: RangeInclusive<u64>,
         ) -> u64 {
             let session = session(scale_factor);
-            let source_rows = session.get_scaling().get_row_count(table(name));
+            let source_rows = source_rows(name, scale_factor);
             match name {
                 $($name => {
                     let mut rows = $generator::new(session, source_rows);
