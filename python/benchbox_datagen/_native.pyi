@@ -15,10 +15,11 @@ class FileStat:
     bytes: int
 
 def generate_table(
-    benchmark: str, table: str, scale_factor: float, part: int = 1, parts: int = 1
+    benchmark: str, table: str, scale_factor: float, part: int = 1, parts: int = 1, seed: int | None = None
 ) -> TableStream: ...
 def table_names(benchmark: str) -> list[str]: ...
 def row_counts(benchmark: str, scale_factor: float) -> dict[str, int]: ...
+def key_ranges(benchmark: str, scale_factor: float) -> dict[str, dict[str, tuple[int, int]]]: ...
 def write_tables(
     benchmark: str,
     scale_factor: float,
@@ -27,4 +28,5 @@ def write_tables(
     compression: str | None = None,
     threads: int | None = None,
     parts: int = 1,
+    seed: int | None = None,
 ) -> list[FileStat]: ...

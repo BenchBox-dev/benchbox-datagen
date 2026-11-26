@@ -1,0 +1,70 @@
+{
+ "customer": [
+  ["c_custkey", "int64", true],
+  ["c_name", "string", true],
+  ["c_address", "string", true],
+  ["c_city", "string", true],
+  ["c_nation", "string", true],
+  ["c_region", "string", true],
+  ["c_phone", "string", true],
+  ["c_mktsegment", "string", true]
+ ],
+ "date": [
+  ["d_datekey", "int64", true],
+  ["d_date", "string", true],
+  ["d_dayofweek", "string", true],
+  ["d_month", "string", true],
+  ["d_year", "int64", true],
+  ["d_yearmonthnum", "int64", true],
+  ["d_yearmonth", "string", true],
+  ["d_daynuminweek", "int64", true],
+  ["d_daynuminmonth", "int64", true],
+  ["d_daynuminyear", "int64", true],
+  ["d_monthnuminyear", "int64", true],
+  ["d_weeknuminyear", "int64", true],
+  ["d_sellingseason", "string", true],
+  ["d_lastdayinweekfl", "int64", true],
+  ["d_lastdayinmonthfl", "int64", true],
+  ["d_holidayfl", "int64", true],
+  ["d_weekdayfl", "int64", true]
+ ],
+ "lineorder": [
+  ["lo_orderkey", "int64", true],
+  ["lo_linenumber", "int64", true],
+  ["lo_custkey", "int64", true],
+  ["lo_partkey", "int64", true],
+  ["lo_suppkey", "int64", true],
+  ["lo_orderdate", "int64", false],
+  ["lo_orderpriority", "string", true],
+  ["lo_shippriority", "int64", true],
+  ["lo_quantity", "int64", true],
+  ["lo_extendedprice", "int64", true],
+  ["lo_ordtotalprice", "int64", true],
+  ["lo_discount", "int64", true],
+  ["lo_revenue", "int64", true],
+  ["lo_supplycost", "int64", true],
+  ["lo_tax", "int64", true],
+  ["lo_commitdate", "int64", true],
+  ["lo_shipmode", "string", true]
+ ],
+ "part": [
+  ["p_partkey", "int64", true],
+  ["p_name", "string", true],
+  ["p_mfgr", "string", true],
+  ["p_category", "string", true],
+  ["p_brand1", "string", true],
+  ["p_color", "string", true],
+  ["p_type", "string", true],
+  ["p_size", "int64", true],
+  ["p_container", "string", true]
+ ],
+ "supplier": [
+  ["s_suppkey", "int64", true],
+  ["s_name", "string", true],
+  ["s_address", "string", true],
+  ["s_city", "string", true],
+  ["s_nation", "string", true],
+  ["s_region", "string", true],
+  ["s_phone", "string", true]
+ ]
+}

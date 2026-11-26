@@ -10,7 +10,7 @@ use std::thread;
 use arrow::record_batch::RecordBatch;
 use benchbox_datagen_writers::{Compression, Error as WriterError, ParquetTableWriter};
 
-use crate::{Benchmark, Error, conformed, pipeline, tpch, validate_scale_factor};
+use crate::{Benchmark, Error, conformed, pipeline, synthetic, tpch, validate_scale_factor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -47,6 +47,7 @@ pub struct OutputRequest {
     pub compression: Option<Compression>,
     pub threads: Option<NonZeroUsize>,
     pub parts: i32,
+    pub seed: Option<u64>,
     pub output_dir: PathBuf,
 }
 
@@ -131,12 +132,15 @@ fn write_with(
         }
         (Format::Parquet, compression) => compression.unwrap_or_default(),
     };
+    let seed = request.benchmark.resolve_seed(request.seed)?;
     let threads = request
         .threads
         .or_else(|| thread::available_parallelism().ok())
         .map_or(1, NonZeroUsize::get);
     fs::create_dir_all(&request.output_dir).map_err(|e| io_error(&request.output_dir, e))?;
     let job = TableJob {
+        benchmark: request.benchmark,
+        seed,
         scale_factor: request.scale_factor,
         format: request.format,
         compression,
@@ -149,7 +153,7 @@ fn write_with(
     let mut stats = Vec::new();
     let outcome = (|| {
         for table in request.benchmark.tables() {
-            let split = request.parts > 1 && !matches!(*table, "nation" | "region");
+            let split = request.parts > 1 && !request.benchmark.is_unsplit(table);
             if split {
                 job.write_parts(table, request.parts, &mut stats)?;
             } else {
@@ -179,6 +183,8 @@ fn write_with(
 }
 
 struct TableJob<'a> {
+    benchmark: Benchmark,
+    seed: u64,
     scale_factor: f64,
     format: Format,
     compression: Compression,
@@ -225,7 +231,112 @@ impl TableJob<'_> {
         })
     }
 
+    fn stream_synthetic_file(
+        &self,
+        table: &str,
+        part: i32,
+        parts: i32,
+        path: &Path,
+    ) -> Result<u64, Error> {
+        let file = File::create(path).map_err(|e| io_error(path, e))?;
+        let source = synthetic::open(self.benchmark, table, self.scale_factor, self.seed);
+        let batches = synthetic::Part::new(source.clone(), part, parts);
+        match self.format {
+            Format::Tbl => {
+                let mut sink = Cancellable {
+                    inner: BufWriter::new(file),
+                    cancel: self.cancel,
+                };
+                let (mut rows, mut bytes) = (0, Vec::new());
+                for batch in batches {
+                    bytes.clear();
+                    synthetic::delimited::encode(&batch, &mut bytes);
+                    rows += batch.num_rows() as u64;
+                    sink.write_all(&bytes).map_err(|e| io_error(path, e))?;
+                }
+                sink.flush().map_err(|e| io_error(path, e))?;
+                Ok(rows)
+            }
+            Format::Parquet => {
+                let mut writer = ParquetTableWriter::new(
+                    BufWriter::new(file),
+                    source.schema(),
+                    self.compression,
+                    1,
+                )
+                .map_err(|e| writer_error(path, e))?;
+                for batch in batches {
+                    if self.cancel.load(Ordering::Relaxed) {
+                        return Err(Error::Cancelled);
+                    }
+                    writer.write(batch).map_err(|e| writer_error(path, e))?;
+                }
+                let (mut sink, rows) = writer.finish().map_err(|e| writer_error(path, e))?;
+                sink.flush().map_err(|e| io_error(path, e))?;
+                Ok(rows)
+            }
+        }
+    }
+
+    fn write_synthetic_single(&self, table: &'static str) -> Result<FileStats, Error> {
+        let path = file_path(self.dir, table, None, self.format);
+        let source = synthetic::open(self.benchmark, table, self.scale_factor, self.seed);
+        let file = File::create(&path).map_err(|e| io_error(&path, e))?;
+        let window = self.buffered * 2;
+        let jobs = source.blocks() as usize;
+        let rows = match self.format {
+            Format::Tbl => {
+                let mut file = BufWriter::new(file);
+                let mut rows = 0;
+                pipeline::ordered(
+                    jobs,
+                    self.workers,
+                    window,
+                    self.cancel,
+                    || Error::Cancelled,
+                    |index| {
+                        let batch = source.block(index as u64);
+                        let mut bytes = Vec::new();
+                        synthetic::delimited::encode(&batch, &mut bytes);
+                        Ok((bytes, batch.num_rows() as u64))
+                    },
+                    |(bytes, count): (Vec<u8>, u64)| {
+                        rows += count;
+                        file.write_all(&bytes).map_err(|e| io_error(&path, e))
+                    },
+                )?;
+                file.flush().map_err(|e| io_error(&path, e))?;
+                rows
+            }
+            Format::Parquet => {
+                let mut writer = ParquetTableWriter::new(
+                    BufWriter::new(file),
+                    source.schema(),
+                    self.compression,
+                    self.buffered,
+                )
+                .map_err(|e| writer_error(&path, e))?;
+                pipeline::ordered(
+                    jobs,
+                    self.workers,
+                    window,
+                    self.cancel,
+                    || Error::Cancelled,
+                    |index| Ok(source.block(index as u64)),
+                    |batch: RecordBatch| writer.write(batch).map_err(|e| writer_error(&path, e)),
+                )?;
+                let (mut sink, rows) = writer.finish().map_err(|e| writer_error(&path, e))?;
+                sink.flush().map_err(|e| io_error(&path, e))?;
+                rows
+            }
+        };
+        self.stats(table, path, rows)
+    }
+
     fn stream_file(&self, table: &str, part: i32, parts: i32, path: &Path) -> Result<u64, Error> {
+        if self.benchmark == Benchmark::Ssb {
+            return self.stream_synthetic_file(table, part, parts, path);
+        }
         let file = File::create(path).map_err(|e| io_error(path, e))?;
         match self.format {
             Format::Tbl => {
@@ -261,6 +372,9 @@ impl TableJob<'_> {
     }
 
     fn write_single(&self, table: &'static str) -> Result<FileStats, Error> {
+        if self.benchmark == Benchmark::Ssb {
+            return self.write_synthetic_single(table);
+        }
         let path = file_path(self.dir, table, None, self.format);
         let (driver_rows, default_chunk_rows) = tpch::chunk_driver_rows(table, self.scale_factor);
         let chunk_rows = self.chunk_rows.unwrap_or(default_chunk_rows).max(1);
@@ -357,6 +471,7 @@ mod tests {
             compression: None,
             threads: NonZeroUsize::new(threads),
             parts,
+            seed: None,
             output_dir: dir.to_path_buf(),
         }
     }

@@ -1,6 +1,7 @@
 mod output;
 mod pipeline;
 mod schema;
+mod synthetic;
 mod tpch;
 
 use std::fmt;
@@ -40,6 +41,8 @@ pub enum Error {
     Write(String),
     #[error("{0}")]
     Encode(String),
+    #[error("{0} output is not seeded; omit the seed argument")]
+    SeedNotSupported(Benchmark),
     #[error("generation was cancelled")]
     Cancelled,
 }
@@ -48,14 +51,35 @@ pub enum Error {
 #[non_exhaustive]
 pub enum Benchmark {
     Tpch,
+    Ssb,
 }
 
 impl Benchmark {
-    pub const ALL: [Benchmark; 1] = [Benchmark::Tpch];
+    pub const ALL: [Benchmark; 2] = [Benchmark::Tpch, Benchmark::Ssb];
 
     pub fn name(self) -> &'static str {
         match self {
             Benchmark::Tpch => "tpch",
+            Benchmark::Ssb => "ssb",
+        }
+    }
+
+    pub fn is_seeded(self) -> bool {
+        matches!(self, Benchmark::Ssb)
+    }
+
+    pub(crate) fn is_unsplit(self, table: &str) -> bool {
+        matches!(
+            (self, table),
+            (Benchmark::Tpch, "nation" | "region") | (Benchmark::Ssb, "date")
+        )
+    }
+
+    pub(crate) fn resolve_seed(self, seed: Option<u64>) -> Result<u64, Error> {
+        match (self.is_seeded(), seed) {
+            (true, seed) => Ok(seed.unwrap_or(synthetic::DEFAULT_SEED)),
+            (false, None) => Ok(0),
+            (false, Some(_)) => Err(Error::SeedNotSupported(self)),
         }
     }
 
@@ -76,6 +100,7 @@ impl Benchmark {
                 "nation", "region", "part", "supplier", "partsupp", "customer", "orders",
                 "lineitem",
             ],
+            Benchmark::Ssb => &["date", "customer", "supplier", "part", "lineorder"],
         }
     }
 }
@@ -104,12 +129,30 @@ pub struct TableRequest {
     pub scale_factor: f64,
     pub part: i32,
     pub parts: i32,
+    pub seed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyRange {
+    pub table: &'static str,
+    pub column: &'static str,
+    pub min: i64,
+    pub max: i64,
+}
+
+pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
+    validate_scale_factor(scale_factor)?;
+    Ok(match benchmark {
+        Benchmark::Tpch => tpch::key_ranges(scale_factor),
+        Benchmark::Ssb => synthetic::ssb_key_ranges(scale_factor),
+    })
 }
 
 pub fn table_schema(benchmark: Benchmark, table: &str) -> Result<SchemaRef, Error> {
     let table = benchmark.table(table)?;
     match benchmark {
         Benchmark::Tpch => Ok(schema::tpch(table).expect("every TPC-H table has a schema")),
+        Benchmark::Ssb => Ok(synthetic::ssb_schema(table)),
     }
 }
 
@@ -123,6 +166,11 @@ pub fn row_counts(
             .tables()
             .iter()
             .map(|table| (*table, tpch::row_count(table, scale_factor)))
+            .collect()),
+        Benchmark::Ssb => Ok(benchmark
+            .tables()
+            .iter()
+            .map(|table| (*table, synthetic::row_count(benchmark, table, scale_factor)))
             .collect()),
     }
 }
@@ -190,6 +238,7 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         scale_factor,
         part,
         parts,
+        seed,
     } = request;
     validate_scale_factor(*scale_factor)?;
     if *parts < 1 || *part < 1 || part > parts {
@@ -199,8 +248,22 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         });
     }
     let table = benchmark.table(table)?;
+    let seed = benchmark.resolve_seed(*seed)?;
     match benchmark {
         Benchmark::Tpch => Ok(Box::new(conformed(table, *scale_factor, *part, *parts))),
+        Benchmark::Ssb if benchmark.is_unsplit(table) => {
+            let source = synthetic::open(*benchmark, table, *scale_factor, seed);
+            Ok(Box::new(if *part > 1 {
+                synthetic::Reader::empty(source)
+            } else {
+                synthetic::Reader::new(source, 1, 1)
+            }))
+        }
+        Benchmark::Ssb => Ok(Box::new(synthetic::Reader::new(
+            synthetic::open(*benchmark, table, *scale_factor, seed),
+            *part,
+            *parts,
+        ))),
     }
 }
 
@@ -217,6 +280,7 @@ mod tests {
             scale_factor,
             part,
             parts,
+            seed: None,
         }
     }
 
