@@ -1,0 +1,69 @@
+{
+ "cpu": [
+  ["time", "timestamp[us]", true],
+  ["hostname", "string", true],
+  ["usage_user", "double", true],
+  ["usage_system", "double", true],
+  ["usage_idle", "double", true],
+  ["usage_nice", "double", true],
+  ["usage_iowait", "double", true],
+  ["usage_irq", "double", true],
+  ["usage_softirq", "double", true],
+  ["usage_steal", "double", true],
+  ["usage_guest", "double", true],
+  ["usage_guest_nice", "double", true]
+ ],
+ "disk": [
+  ["time", "timestamp[us]", true],
+  ["hostname", "string", true],
+  ["device", "string", true],
+  ["reads_completed", "int64", true],
+  ["reads_merged", "int64", true],
+  ["sectors_read", "int64", true],
+  ["read_time_ms", "int64", true],
+  ["writes_completed", "int64", true],
+  ["writes_merged", "int64", true],
+  ["sectors_written", "int64", true],
+  ["write_time_ms", "int64", true],
+  ["io_in_progress", "int64", true],
+  ["io_time_ms", "int64", true],
+  ["weighted_io_time_ms", "int64", true]
+ ],
+ "mem": [
+  ["time", "timestamp[us]", true],
+  ["hostname", "string", true],
+  ["total", "int64", true],
+  ["available", "int64", true],
+  ["used", "int64", true],
+  ["free", "int64", true],
+  ["cached", "int64", true],
+  ["buffered", "int64", true],
+  ["used_percent", "double", true],
+  ["available_percent", "double", true]
+ ],
+ "net": [
+  ["time", "timestamp[us]", true],
+  ["hostname", "string", true],
+  ["interface", "string", true],
+  ["bytes_recv", "int64", true],
+  ["bytes_sent", "int64", true],
+  ["packets_recv", "int64", true],
+  ["packets_sent", "int64", true],
+  ["err_in", "int64", true],
+  ["err_out", "int64", true],
+  ["drop_in", "int64", true],
+  ["drop_out", "int64", true]
+ ],
+ "tags": [
+  ["hostname", "string", true],
+  ["region", "string", true],
+  ["datacenter", "string", true],
+  ["rack", "string", true],
+  ["os", "string", true],
+  ["arch", "string", true],
+  ["team", "string", true],
+  ["service", "string", true],
+  ["service_version", "string", true],
+  ["service_environment", "string", true]
+ ]
+}

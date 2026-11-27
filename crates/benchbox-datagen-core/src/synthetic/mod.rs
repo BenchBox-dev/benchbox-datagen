@@ -2,6 +2,7 @@ pub(crate) mod calendar;
 pub(crate) mod delimited;
 pub(crate) mod rng;
 mod ssb;
+mod tsbs_devops;
 
 use std::fmt;
 use std::io::{self, Write};
@@ -66,6 +67,7 @@ pub(crate) trait Generator: Sync {
 #[rustfmt::skip]
 const REGISTRY: &[&dyn Generator] = &[
     &ssb::Ssb,
+    &tsbs_devops::TsbsDevops,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
