@@ -6,6 +6,7 @@ mod refresh;
 mod schema;
 mod synthetic;
 mod tpcds;
+mod tpcds_update;
 mod tpch;
 
 use std::fmt;
@@ -191,9 +192,16 @@ pub fn write_refresh_sets(
             }
             refresh::write_tpch_refresh(scale_factor, sets, output_dir, cancel)
         }
-        Benchmark::Tpcds => Err(Error::RefreshUnsupported(
-            "tpcds refresh sets are not available in this build".into(),
-        )),
+        Benchmark::Tpcds => {
+            tpcds_update::validate_refresh_scale(scale_factor)?;
+            tpcds_update::write_tpcds_refresh(
+                scale_factor,
+                sets,
+                rng_seed.unwrap_or(tpcds_update::DEFAULT_SEED),
+                output_dir,
+                cancel,
+            )
+        }
         Benchmark::Ssb => Err(Error::RefreshUnsupported("ssb has no refresh sets".into())),
     }
 }
