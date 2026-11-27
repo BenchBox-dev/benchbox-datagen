@@ -182,7 +182,7 @@ empty-seed count is higher than legacy's with one-sided Fisher exact p < 0.001
 
 `table_scales(benchmark, scale_factor)` reports each table's `id_count` and `source_rows`.
 `active_locations("tpcds", scale_factor)` returns the dsqgen `rowcount()` inputs
-`active_cities`, `active_counties` and `active_states` (TPC-DS only; TPC-H raises
+`active_cities`, `active_counties` and `active_states` (TPC-DS only; TPC-H and SSB raise
 `ValueError`). They equal what the patched `dsqgen` returns for `rowcount("active_cities")`
 and friends at integer scale factors of 1 or more, and below 1 they are 1, the value the
 patched `dsdgen` store, call center, warehouse and web site addresses draw from. Templates

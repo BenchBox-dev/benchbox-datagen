@@ -207,7 +207,7 @@ pub fn active_locations(benchmark: Benchmark, scale_factor: f64) -> Result<Activ
     validate_scale_factor(benchmark, scale_factor)?;
     match benchmark {
         Benchmark::Tpcds => Ok(tpcds::active_locations(scale_factor)),
-        Benchmark::Tpch => Err(Error::NoActiveLocations(benchmark)),
+        Benchmark::Tpch | Benchmark::Ssb => Err(Error::NoActiveLocations(benchmark)),
     }
 }
 
