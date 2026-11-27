@@ -11,6 +11,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import synthetic_configs
+
 BUDGETS = {
     ("tpch", 1.0, "tbl"): (3.0, 1536),
     ("tpch", 1.0, "parquet"): (4.0, 1536),
@@ -20,11 +22,10 @@ BUDGETS = {
     ("tpcds", 1.0, "parquet"): (4.0, 1024),
     ("tpcds", 10.0, "tbl"): (30.0, 2048),
     ("tpcds", 10.0, "parquet"): (40.0, 2048),
-    ("ssb", 1.0, "tbl"): (5.0, 512),
-    ("ssb", 1.0, "parquet"): (6.0, 512),
-    ("ssb", 10.0, "tbl"): (50.0, 1024),
-    ("ssb", 10.0, "parquet"): (60.0, 1024),
 }
+for name in synthetic_configs.names():
+    for (scale, fmt), budget in synthetic_configs.load(name).budgets.items():
+        BUDGETS[(name, scale, fmt)] = budget
 
 CHILD = """
 import json, resource, sys, time
@@ -72,7 +73,7 @@ def measure(benchmark: str, scale: float, fmt: str, threads: str, workdir: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--benchmark", choices=["tpch", "tpcds", "ssb"], default="tpch")
+    parser.add_argument("--benchmark", choices=["tpch", "tpcds", *synthetic_configs.names()], default="tpch")
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--scales", type=float, nargs="+", default=[1.0, 10.0])
     parser.add_argument("--formats", nargs="+", default=["tbl", "parquet"])

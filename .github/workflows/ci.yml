@@ -91,6 +91,6 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: uv venv --python 3.11
-      - run: uv pip install "maturin>=1.16,<2" pyarrow pytest
+      - run: uv pip install "maturin>=1.16,<2" pyarrow pytest duckdb
       - run: uv run --no-project maturin develop --release --locked
       - run: uv run --no-project pytest tests
