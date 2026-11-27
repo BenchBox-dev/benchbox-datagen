@@ -104,6 +104,12 @@ def test_row_counts_equal_the_published_scale_factor_one_cardinalities():
     assert counts == SF1_ROWS
 
 
+def test_row_counts_honour_threads():
+    assert benchbox_datagen.row_counts("tpcds", 1.0, threads=1) == SF1_ROWS
+    with pytest.raises(ValueError, match="threads must be at least 1"):
+        benchbox_datagen.row_counts("tpcds", 1.0, threads=0)
+
+
 def test_row_counts_scale_with_the_scale_factor():
     counts = benchbox_datagen.row_counts("tpcds", 10.0)
     assert counts["store_sales"] == 28_800_991
