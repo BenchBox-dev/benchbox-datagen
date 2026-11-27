@@ -22,11 +22,12 @@ TPC generation depends on the upstream Apache-2.0 crates from
 [`datafusion-contrib/tpcgen-rs`](https://github.com/datafusion-contrib/tpcgen-rs),
 pinned by exact version. This project does not fork them: fixes go upstream.
 
-Today the library generates TPC-H (all eight tables, any scale factor) as
+Today the library generates TPC-H (all eight tables, any scale factor) and TPC-DS (the 24 benchmark tables at scale factor 1 or above, in `CompatMode::C`, byte-identical to the bundled `dsdgen`) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
-`NOT NULL` columns non-nullable). Delimited `.tbl` output is byte-identical to
-the bundled `dbgen` output with the trailing `|` removed, for every table.
+`NOT NULL` columns non-nullable). Delimited output is byte-identical to the
+bundled `dbgen` / `dsdgen -TERMINATE n` output (no trailing `|`), for every table.
+TPC-DS below scale factor 1 is refused until fractional scales are implemented.
 Parquet output is written in Rust with 122,880-row row groups and the
 `benchbox.parquet_writer=benchbox-datagen-<major>` key-value entry; neither
 format's bytes depend on the thread count.
@@ -54,6 +55,9 @@ import benchbox_datagen
 counts = benchbox_datagen.row_counts("tpch", 10.0)
 assert counts["lineitem"] == 59_986_052
 
+ranges = benchbox_datagen.key_ranges("tpcds", 10.0)
+assert ranges["item"]["i_item_sk"] == (1, 102_000)
+
 files = benchbox_datagen.write_tables(
     "tpch",
     10.0,
@@ -70,8 +74,16 @@ for file in files:
 compression=None, threads=None, parts=1)` writes one `<table>.<format>` file per
 table (`format` is `"parquet"` or `"tbl"`; Parquet compression is `"none"`,
 `"snappy"` (default), `"gzip"` or `"zstd"`; `.tbl` is uncompressed). With
-`parts > 1` each table except `nation` and `region` is split into
-`<table>.<format>.<part>` files (for example `lineitem.tbl.3`, the same shard naming BenchBox uses). `threads=None` uses every available CPU.
+`parts > 1` each table is split into `<table>.<format>.<part>` files (for example
+`lineitem.tbl.3`, the same shard naming BenchBox uses), except TPC-H `nation` and
+`region` and, for TPC-DS, every table with fewer than 1,000,000 source rows (at scale
+factor 1 only `customer_demographics` and `inventory` are split). `threads=None` uses
+every available CPU.
+
+`row_counts(benchmark, scale_factor, threads=None)` is closed-form for TPC-H. For TPC-DS
+the sales and returns counts come from running the generator over every line item, so
+the cost grows with the scale factor (about 0.2 s at scale factor 1 on all cores); it
+uses `threads` workers and responds to Ctrl-C.
 
 ## Layout
 
@@ -92,7 +104,7 @@ uv venv && uv pip install maturin pyarrow pytest
 maturin develop --release && pytest tests
 ```
 
-`tools/parity_tpch.py` compares library output with a directory of `dbgen`
+`tools/parity.py` compares library output with a directory of `dbgen`
 output by SHA-256, and `tools/bench_budgets.py` measures the wall-time and
 peak-RSS budgets from the design ADR.
 

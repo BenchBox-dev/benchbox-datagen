@@ -145,3 +145,49 @@ static TPCH_SCHEMAS: LazyLock<HashMap<&'static str, SchemaRef>> = LazyLock::new(
 pub(crate) fn tpch(table: &str) -> Option<SchemaRef> {
     TPCH_SCHEMAS.get(table).cloned()
 }
+
+const TPCDS_SPEC: &str = include_str!("tpcds_schema.txt");
+
+fn parse_type(token: &str) -> DataType {
+    match token {
+        "int64" => DataType::Int64,
+        "string" => DataType::Utf8,
+        "date32" => DataType::Date32,
+        decimal => {
+            let (precision, scale) = decimal
+                .strip_prefix("decimal128(")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .and_then(|inner| inner.split_once(','))
+                .expect("the TPC-DS schema spec only uses int64, string, date32 and decimal128");
+            DataType::Decimal128(
+                precision.parse().expect("decimal precision is a number"),
+                scale.parse().expect("decimal scale is a number"),
+            )
+        }
+    }
+}
+
+static TPCDS_SCHEMAS: LazyLock<HashMap<&'static str, SchemaRef>> = LazyLock::new(|| {
+    let mut tables: HashMap<&'static str, Vec<Field>> = HashMap::new();
+    for line in TPCDS_SPEC.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(table), Some(name), Some(data_type), Some(nullability)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        tables.entry(table).or_default().push(Field::new(
+            name,
+            parse_type(data_type),
+            nullability == "null",
+        ));
+    }
+    tables
+        .into_iter()
+        .map(|(table, fields)| (table, Arc::new(Schema::new(fields))))
+        .collect()
+});
+
+pub(crate) fn tpcds(table: &str) -> Option<SchemaRef> {
+    TPCDS_SCHEMAS.get(table).cloned()
+}

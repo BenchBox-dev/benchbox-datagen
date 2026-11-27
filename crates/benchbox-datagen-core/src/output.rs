@@ -12,7 +12,8 @@ use arrow::record_batch::RecordBatch;
 use benchbox_datagen_writers::{Compression, Error as WriterError, ParquetTableWriter};
 use parquet::errors::ParquetError;
 
-use crate::{Benchmark, Error, conformed, pipeline, tpch, validate_scale_factor};
+use crate::generate;
+use crate::{Benchmark, Error, conformed, pipeline, validate_scale_factor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -60,7 +61,7 @@ pub struct FileStats {
     pub bytes: u64,
 }
 
-const MAX_BUFFERED_THREADS: usize = 8;
+const MAX_BUFFERED_THREADS: usize = 4;
 const MAX_WORKERS: usize = 16;
 
 fn io_error(path: &Path, error: impl Display) -> Error {
@@ -125,7 +126,7 @@ fn write_with(
     cancel: &AtomicBool,
     chunk_rows: Option<u64>,
 ) -> Result<Vec<FileStats>, Error> {
-    validate_scale_factor(request.scale_factor)?;
+    validate_scale_factor(request.benchmark, request.scale_factor)?;
     if request.parts < 1 {
         return Err(Error::InvalidParts(request.parts));
     }
@@ -145,6 +146,7 @@ fn write_with(
         .map_or(1, NonZeroUsize::get);
     fs::create_dir_all(&request.output_dir).map_err(|e| io_error(&request.output_dir, e))?;
     let job = TableJob {
+        benchmark: request.benchmark,
         scale_factor: request.scale_factor,
         format: request.format,
         compression,
@@ -158,7 +160,8 @@ fn write_with(
     let mut stats = Vec::new();
     let outcome = (|| {
         for table in request.benchmark.tables() {
-            let split = request.parts > 1 && !matches!(*table, "nation" | "region");
+            let split = request.parts > 1
+                && generate::splittable(request.benchmark, table, request.scale_factor);
             if split {
                 job.write_parts(table, request.parts, &mut stats)?;
             } else {
@@ -184,6 +187,7 @@ fn write_with(
 }
 
 struct TableJob<'a> {
+    benchmark: Benchmark,
     scale_factor: f64,
     format: Format,
     compression: Compression,
@@ -242,17 +246,24 @@ impl TableJob<'_> {
 
     fn stream_file(&self, table: &str, part: i32, parts: i32, path: &Path) -> Result<u64, Error> {
         let file = self.create(path)?;
+        let slice = generate::part_slice(self.benchmark, table, self.scale_factor, part, parts);
         match self.format {
             Format::Tbl => {
                 let mut sink = Cancellable {
                     inner: file,
                     cancel: self.cancel,
                 };
-                tpch::write_delimited(table, self.scale_factor, part, parts, &mut sink)
-                    .map_err(|e| io_error(path, e))
+                generate::write_delimited(
+                    self.benchmark,
+                    table,
+                    self.scale_factor,
+                    &slice,
+                    &mut sink,
+                )
+                .map_err(|e| io_error(path, e))
             }
             Format::Parquet => {
-                let reader = conformed(table, self.scale_factor, part, parts);
+                let reader = conformed(self.benchmark, table, self.scale_factor, &slice);
                 let mut writer = ParquetTableWriter::new(
                     BufWriter::new(file),
                     reader.schema_ref(),
@@ -277,9 +288,7 @@ impl TableJob<'_> {
 
     fn write_single(&self, table: &'static str) -> Result<FileStats, Error> {
         let path = file_path(self.dir, table, None, self.format);
-        let (driver_rows, default_chunk_rows) = tpch::chunk_driver_rows(table, self.scale_factor);
-        let chunk_rows = self.chunk_rows.unwrap_or(default_chunk_rows).max(1);
-        let chunks = driver_rows.div_ceil(chunk_rows).clamp(1, i32::MAX as u64) as i32;
+        let slices = generate::plan(self.benchmark, table, self.scale_factor, self.chunk_rows);
         let file = self.create(&path)?;
         let window = self.buffered * 2;
         let rows = match self.format {
@@ -287,18 +296,18 @@ impl TableJob<'_> {
                 let mut file = file;
                 let mut rows = 0;
                 pipeline::ordered(
-                    chunks as usize,
+                    slices.len(),
                     self.workers,
                     window,
                     self.cancel,
                     || Error::Cancelled,
                     |index| {
                         let mut bytes = Vec::new();
-                        let rows = tpch::write_delimited(
+                        let rows = generate::write_delimited(
+                            self.benchmark,
                             table,
                             self.scale_factor,
-                            index as i32 + 1,
-                            chunks,
+                            &slices[index],
                             &mut bytes,
                         )
                         .map_err(|e| io_error(&path, e))?;
@@ -312,7 +321,7 @@ impl TableJob<'_> {
                 rows
             }
             Format::Parquet => {
-                let schema = conformed(table, self.scale_factor, 1, 1).schema_ref();
+                let schema = generate::schema(self.benchmark, table);
                 let mut writer = ParquetTableWriter::new(
                     BufWriter::new(file),
                     schema,
@@ -321,13 +330,13 @@ impl TableJob<'_> {
                 )
                 .map_err(|e| writer_error(&path, e))?;
                 pipeline::ordered(
-                    chunks as usize,
+                    slices.len(),
                     self.workers,
                     window,
                     self.cancel,
                     || Error::Cancelled,
                     |index| {
-                        conformed(table, self.scale_factor, index as i32 + 1, chunks)
+                        conformed(self.benchmark, table, self.scale_factor, &slices[index])
                             .collect::<Result<Vec<RecordBatch>, _>>()
                             .map_err(|e| encode_error(&path, e))
                     },
@@ -576,6 +585,52 @@ mod tests {
     }
 
     #[test]
+    fn tpcds_multi_chunk_output_equals_single_chunk_output() {
+        let tables = [
+            "call_center",
+            "item",
+            "store",
+            "web_page",
+            "web_site",
+            "web_sales",
+            "web_returns",
+        ];
+        let write = |table: &'static str, format: Format, chunk_rows: u64| {
+            let dir = tempfile::tempdir().unwrap();
+            let cancel = AtomicBool::new(false);
+            let job = TableJob {
+                benchmark: Benchmark::Tpcds,
+                scale_factor: 1.0,
+                format,
+                compression: Compression::None,
+                workers: 4,
+                buffered: 2,
+                chunk_rows: Some(chunk_rows),
+                cancel: &cancel,
+                dir: dir.path(),
+                created: Mutex::new(Vec::new()),
+            };
+            let stats = job.write_single(table).unwrap();
+            (stats.rows, fs::read(&stats.path).unwrap())
+        };
+        for format in [Format::Tbl, Format::Parquet] {
+            for table in tables {
+                let total = crate::tpcds::source_rows(table, 1.0);
+                let mut step = total.div_ceil(11).max(5);
+                while step.is_multiple_of(2) || step.is_multiple_of(3) {
+                    step += 1;
+                }
+                assert!(generate::plan(Benchmark::Tpcds, table, 1.0, Some(step)).len() > 1);
+                assert_eq!(
+                    write(table, format, step),
+                    write(table, format, u64::MAX / 2),
+                    "{table} {format:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_cancelled_write_stops_and_leaves_no_files() {
         for (format, parts) in [(Format::Tbl, 1), (Format::Parquet, 1), (Format::Tbl, 3)] {
             let dir = tempfile::tempdir().unwrap();
@@ -602,13 +657,22 @@ mod tests {
                     .unwrap();
             })
         };
-        while !watched.exists() && receiver.try_recv().is_err() {
-            thread::sleep(std::time::Duration::from_millis(1));
+        let mut early = None;
+        while !watched.exists() {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    early = Some(result);
+                    break;
+                }
+                Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
+            }
         }
         cancel.store(true, Ordering::Relaxed);
-        let result = receiver
-            .recv_timeout(std::time::Duration::from_secs(60))
-            .expect("a cancelled write must return promptly");
+        let result = early.unwrap_or_else(|| {
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("a cancelled write must return promptly")
+        });
         runner.join().unwrap();
         result
     }
