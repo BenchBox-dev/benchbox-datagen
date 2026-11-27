@@ -111,7 +111,10 @@ impl Distribution {
                 }
                 continue;
             }
-            if line.len() >= 3 && line[..3].eq_ignore_ascii_case("end") {
+            if line
+                .get(..3)
+                .is_some_and(|word| word.eq_ignore_ascii_case("end"))
+            {
                 break;
             }
             let Some((token, weight)) = line.split_once('|') else {
@@ -130,7 +133,7 @@ impl Distribution {
         if !inside {
             return Err(QgenError::MissingDistribution(name.to_owned()));
         }
-        if count != Some(entries.len()) {
+        if entries.is_empty() || count != Some(entries.len()) {
             return Err(QgenError::MalformedDistribution(name.to_owned()));
         }
         Ok(Self { entries })
@@ -309,8 +312,14 @@ fn generate_parameters(
         8 => {
             let (index, nation) = rng.pick(&dists.nations2);
             let nation = nation.to_owned();
-            let region_index = dists.nations.entries[index].1 as usize;
-            let region = dists.regions.entries[region_index].0.clone();
+            let region = dists
+                .nations
+                .entries
+                .get(index)
+                .and_then(|entry| usize::try_from(entry.1).ok())
+                .and_then(|region_index| dists.regions.entries.get(region_index))
+                .map(|entry| entry.0.clone())
+                .ok_or_else(|| QgenError::MalformedDistribution("nations".to_owned()))?;
             let kind = rng.pick(&dists.types).1.to_owned();
             vec![nation, region, kind]
         }
@@ -399,38 +408,27 @@ struct CommentStripper {
 
 impl CommentStripper {
     fn strip(&mut self, line: &str) -> String {
-        let mut text = line.to_owned();
-        let mut start = 0;
-        loop {
-            if self.in_comment {
-                match text[start..].find('}') {
-                    Some(end) => {
-                        text.replace_range(start..start + end + 1, "");
-                        self.in_comment = false;
-                    }
-                    None => {
-                        text.truncate(start);
-                        break;
-                    }
-                }
-            } else {
-                if let Some(dash) = text[start..].find('-')
-                    && text.as_bytes().get(start + dash + 1) == Some(&b'-')
-                {
-                    text.truncate(start + dash);
-                    break;
-                }
-                match text[start..].find('{') {
-                    Some(brace) => {
-                        text.replace_range(start + brace..start + brace + 1, " ");
-                        self.in_comment = true;
-                        start += brace;
-                    }
-                    None => break,
-                }
+        let mut text = line;
+        let mut opened = None;
+        if !self.in_comment {
+            if let Some(dash) = text.find("--") {
+                text = &text[..dash];
+            }
+            if let Some(brace) = text.find('{') {
+                self.in_comment = true;
+                opened = Some(brace + 1);
             }
         }
-        text
+        if !self.in_comment {
+            return text.to_owned();
+        }
+        match text[opened.unwrap_or(0)..].find('}') {
+            Some(end) => {
+                self.in_comment = false;
+                text[opened.unwrap_or(0) + end + 1..].to_owned()
+            }
+            None => String::new(),
+        }
     }
 }
 
@@ -566,6 +564,58 @@ mod tests {
             default_params: false,
         };
         assert_eq!(generate_query(&request), Err(QgenError::SeedRequired));
+    }
+
+    #[test]
+    fn comments_drop_from_line_start_through_the_closing_brace() {
+        let mut stripper = CommentStripper { in_comment: false };
+        assert_eq!(stripper.strip("keep { drop } tail\n"), " tail\n");
+        assert!(!stripper.in_comment);
+        assert_eq!(stripper.strip("before { open\n"), "");
+        assert!(stripper.in_comment);
+        assert_eq!(stripper.strip("still inside\n"), "");
+        assert_eq!(stripper.strip("gone } after\n"), " after\n");
+        assert!(!stripper.in_comment);
+        assert_eq!(stripper.strip("a -- note { b\n"), "a ");
+        assert!(!stripper.in_comment);
+    }
+
+    #[test]
+    fn malformed_distributions_are_errors_not_panics() {
+        let malformed = [
+            "begin colors\ncount|2\na|1\n",
+            "begin colors\n\u{e9}\u{e9}\nen",
+            "begin colors\nen\n",
+            "begin colors\ncount|0\nend\n",
+            "begin colors\ncount|-1\na|1\nend\n",
+        ];
+        for source in malformed {
+            assert_eq!(
+                Distribution::parse(source, "colors").err(),
+                Some(QgenError::MalformedDistribution("colors".to_owned())),
+                "{source:?}"
+            );
+        }
+        let multibyte = Distribution::parse("begin colors\ncount|1\n\u{e9}|1\nend\n", "colors");
+        assert_eq!(multibyte.unwrap().entries, [("\u{e9}".to_owned(), 1)]);
+    }
+
+    #[test]
+    fn distributions_text_never_panics_for_any_query() {
+        for query in 1..=22 {
+            for text in ["", "begin colors\n\u{e9}", "begin p_cntr\ncount|1\n"] {
+                let request = QueryRequest {
+                    query: &query.to_string(),
+                    template: "",
+                    distributions: text,
+                    scale_factor: 1.0,
+                    seed: Some(1),
+                    stream: None,
+                    default_params: false,
+                };
+                assert!(generate_query(&request).is_err());
+            }
+        }
     }
 
     #[test]

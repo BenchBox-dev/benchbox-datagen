@@ -24,6 +24,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: BenchBox-dev/benchbox
+          ref: 5cae9afda8939c965ba95de7865817e72875879e
+          path: benchbox-checkout
+          sparse-checkout: |
+            tests/fixtures/tpc_query_corpus
+            benchbox/_binaries/tpc-h/templates
+          persist-credentials: false
+      - name: Export BENCHBOX_CHECKOUT
+        shell: bash
+        run: echo "BENCHBOX_CHECKOUT=$GITHUB_WORKSPACE/benchbox-checkout" >> "$GITHUB_ENV"
       - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
@@ -56,6 +68,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: BenchBox-dev/benchbox
+          ref: 5cae9afda8939c965ba95de7865817e72875879e
+          path: benchbox-checkout
+          sparse-checkout: |
+            tests/fixtures/tpc_query_corpus
+            benchbox/_binaries/tpc-h/templates
+          persist-credentials: false
+      - name: Export BENCHBOX_CHECKOUT
+        shell: bash
+        run: echo "BENCHBOX_CHECKOUT=$GITHUB_WORKSPACE/benchbox-checkout" >> "$GITHUB_ENV"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.11"

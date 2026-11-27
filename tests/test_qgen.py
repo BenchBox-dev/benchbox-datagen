@@ -10,7 +10,11 @@ import pytest
 import benchbox_datagen
 
 CHECKOUT = os.environ.get("BENCHBOX_CHECKOUT")
-pytestmark = pytest.mark.skipif(CHECKOUT is None, reason="BENCHBOX_CHECKOUT is not set")
+SYNTHETIC_DISTRIBUTIONS = "".join(
+    f"begin {name}\ncount|2\nfirst|1\nsecond|1\nend {name}\n"
+    for name in ("p_cntr", "colors", "p_types", "nations", "nations2", "regions", "smode", "msegmnt", "Q13a", "Q13b")
+)
+SYNTHETIC_TEMPLATE = "select :1;\n"
 
 RANDOM_SEEDS_CHECKED = 500
 QUERIES = [str(number) for number in range(1, 23)] + ["15a"]
@@ -41,6 +45,10 @@ def clean_sql(sql: str) -> str:
 
 @pytest.fixture(scope="module")
 def inputs():
+    if CHECKOUT is None:
+        if os.environ.get("CI"):
+            pytest.fail("BENCHBOX_CHECKOUT is required in CI for the TPC-H corpus tests")
+        pytest.skip("BENCHBOX_CHECKOUT is not set")
     root = Path(CHECKOUT)
     templates = root / "benchbox/_binaries/tpc-h/templates"
     return {
@@ -107,19 +115,37 @@ def test_random_seeds_match_parameters_and_digests(inputs):
         assert digest(texts) == record["h"], record["seed"]
 
 
-def test_seed_zero_queries_that_never_terminate_are_refused(inputs):
+def synthetic(query: str, seed: int | None, **options):
+    return benchbox_datagen.generate_query(
+        "tpch", query, SYNTHETIC_TEMPLATE, SYNTHETIC_DISTRIBUTIONS, 1.0, seed=seed, **options
+    )
+
+
+def test_seed_zero_queries_that_never_terminate_are_refused():
     for query in ("7", "12"):
         with pytest.raises(ValueError, match="does not terminate"):
-            generate(inputs, query, 0, 1.0)
+            synthetic(query, 0)
 
 
-def test_a_seed_or_default_parameters_are_required(inputs):
+def test_a_seed_or_default_parameters_are_required():
     with pytest.raises(ValueError, match="seed"):
-        benchbox_datagen.generate_query(
-            "tpch", "6", inputs["queries"]["6"], inputs["distributions"], 1.0, default_params=False
-        )
+        synthetic("6", None, default_params=False)
 
 
-def test_other_benchmarks_are_rejected(inputs):
+@pytest.mark.parametrize("seed", [-1, 2147483647])
+def test_seeds_outside_the_generator_range_are_refused(seed):
+    with pytest.raises(ValueError, match="outside the supported range"):
+        synthetic("6", seed)
+
+
+def test_other_benchmarks_are_rejected():
     with pytest.raises(ValueError, match="not available"):
         benchbox_datagen.generate_query("tpcds", "1", "", "", 1.0, seed=1)
+
+
+def test_malformed_distributions_are_value_errors():
+    broken = SYNTHETIC_DISTRIBUTIONS.replace("begin colors\ncount|2", "begin colors\n\u00e9\u00e9\ncount|2").replace(
+        "end colors", "en"
+    )
+    with pytest.raises(ValueError, match="malformed"):
+        benchbox_datagen.generate_query("tpch", "9", SYNTHETIC_TEMPLATE, broken, 1.0, seed=1)

@@ -91,6 +91,10 @@ fn strings(value: &Value) -> Vec<String> {
 #[test]
 fn replays_the_conformance_corpus() {
     let Some(root) = checkout() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "BENCHBOX_CHECKOUT is required in CI for the TPC-H corpus replay"
+        );
         eprintln!("BENCHBOX_CHECKOUT is not set; skipping the TPC-H corpus replay");
         return;
     };
@@ -149,4 +153,58 @@ fn replays_the_conformance_corpus() {
         mismatches.len(),
         &mismatches[..mismatches.len().min(10)]
     );
+}
+
+fn synthetic_distributions() -> String {
+    let mut text = String::new();
+    for name in [
+        "p_cntr", "colors", "p_types", "nations", "nations2", "regions", "smode", "msegmnt",
+        "Q13a", "Q13b",
+    ] {
+        text.push_str(&format!(
+            "begin {name}\ncount|2\nfirst|1\nsecond|1\nend {name}\n"
+        ));
+    }
+    text
+}
+
+fn synthetic(query: &str, seed: Option<i64>, default_params: bool) -> Result<(), QgenError> {
+    let distributions = synthetic_distributions();
+    generate_query(&QueryRequest {
+        query,
+        template: "select :1;\n",
+        distributions: &distributions,
+        scale_factor: 1.0,
+        seed,
+        stream: None,
+        default_params,
+    })
+    .map(|_| ())
+}
+
+#[test]
+fn seed_zero_queries_that_never_terminate_are_refused() {
+    for query in ["7", "12"] {
+        assert!(matches!(
+            synthetic(query, Some(0), false),
+            Err(QgenError::NonTerminating { .. })
+        ));
+    }
+    assert!(synthetic("6", Some(0), false).is_ok());
+}
+
+#[test]
+fn a_seed_or_default_parameters_are_required() {
+    assert_eq!(synthetic("6", None, false), Err(QgenError::SeedRequired));
+}
+
+#[test]
+fn seeds_outside_the_generator_range_are_refused() {
+    for seed in [-1, 2_147_483_647] {
+        assert_eq!(
+            synthetic("6", Some(seed), false),
+            Err(QgenError::SeedOutOfRange(seed))
+        );
+    }
+    assert!(synthetic("6", Some(2_147_483_646), false).is_ok());
 }
