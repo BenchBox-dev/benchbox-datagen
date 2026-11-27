@@ -4,6 +4,7 @@ mod pipeline;
 mod refresh;
 mod schema;
 mod tpcds;
+mod tpcds_update;
 mod tpch;
 
 use std::fmt;
@@ -149,9 +150,12 @@ pub fn write_refresh_sets(
             }
             refresh::write_tpch_refresh(scale_factor, sets, output_dir)
         }
-        Benchmark::Tpcds => Err(Error::RefreshUnsupported(
-            "tpcds refresh sets are not available in this build".into(),
-        )),
+        Benchmark::Tpcds => tpcds_update::write_tpcds_refresh(
+            scale_factor,
+            sets,
+            rng_seed.unwrap_or(tpcds_update::DEFAULT_SEED),
+            output_dir,
+        ),
     }
 }
 

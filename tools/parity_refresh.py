@@ -15,8 +15,9 @@ def sha256(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--benchmark", choices=["tpch"], default="tpch")
-    parser.add_argument("--dbgen-dir", required=True, help="directory holding the oracle refresh files (dbgen -U output)")
+    parser.add_argument("--benchmark", choices=["tpch", "tpcds"], default="tpch")
+    parser.add_argument("--dbgen-dir", required=True, help="directory holding the oracle refresh files (dbgen -U or dsdgen -update output)")
+    parser.add_argument("--rng-seed", type=int, default=None, help="tpcds only: dsdgen -rngseed")
     parser.add_argument("--scale", type=float, required=True)
     parser.add_argument("--sets", type=int, required=True)
     parser.add_argument("--workdir", default=None)
@@ -25,7 +26,8 @@ def main() -> int:
     oracle = Path(args.dbgen_dir)
     out = Path(tempfile.mkdtemp(prefix="refresh-", dir=args.workdir))
     try:
-        stats = benchbox_datagen.write_refresh(args.benchmark, args.scale, out, sets=args.sets)
+        extra = {} if args.rng_seed is None else {"rng_seed": args.rng_seed}
+        stats = benchbox_datagen.write_refresh(args.benchmark, args.scale, out, sets=args.sets, **extra)
         report = {}
         ok = True
         for stat in stats:
