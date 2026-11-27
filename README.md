@@ -240,6 +240,37 @@ are a data-dependent subset of the matching sales range, so no exact bounds exis
 without generating the returns rows; the bounds of the sales range would be only a
 superset, and are left out so that every reported range is exact.
 
+### AMPLab
+
+Tables, columns, types and value domains follow BenchBox's legacy
+`AMPLabDataGenerator` (the AMPLab big data benchmark: `rankings`, `documents`,
+`uservisits`, written as `|`-separated `.tbl` without header); only the random
+stream changed. Row counts are the legacy `int(base * SF)` for any scale factor
+(no minimum, so a scale factor below `1 / base` gives an empty table):
+
+| Table | Rows at scale factor `SF` |
+| :--- | :--- |
+| `rankings` | `250,000 * SF` |
+| `documents` | `125,000 * SF` |
+| `uservisits` | `2,500,000 * SF` |
+
+`pageURL` and `url` are `http://<domain>/<path>/<n>` with `n` the 1-based row
+number and a uniformly drawn domain (15) and path (6), so they are unique.
+`uservisits.destURL` uses the same form with `n` uniform in `1..rankings` (80%) or
+`rankings+1..rankings+50,000` (20%) and its own independent domain and path draws, so,
+as in legacy, it matches a `rankings.pageURL` only by coincidence of domain and path
+and the tables have no foreign key. `pageRank` is `floor(10 * Pareto(1.16))` capped
+at 10,000, sampled by inversion against a table built with an owned `ln` and `exp`
+(only `+ - * /`, no libm). `adRevenue` is `0` (90%) or a uniform amount between 0.01 and
+5.00 rounded to cents (10%); `searchWord` is null for half the rows. `visitDate`
+is uniform over 2000-01-01 to 2000-03-31. Delimited output pads decimals
+(`0.00`, `2.50`) where legacy printed Python floats (`0.0`, `2.5`).
+
+`tools/synthetic_acceptance.py amplab ...` (config in
+`tools/synthetic_configs/amplab.py`) produces the legacy-versus-library
+comparison and the query agreement that gate the frozen goldens in
+`crates/benchbox-datagen-core/tests/amplab.rs`; the rules are those of SSB.
+
 ## Adding a synthetic generator
 
 A synthetic generator is one Rust module plus one registry entry (one line),

@@ -1,3 +1,4 @@
+mod amplab;
 pub(crate) mod calendar;
 pub(crate) mod delimited;
 pub(crate) mod rng;
@@ -65,6 +66,7 @@ pub(crate) trait Generator: Sync {
 
 #[rustfmt::skip]
 const REGISTRY: &[&dyn Generator] = &[
+    &amplab::Amplab,
     &ssb::Ssb,
 ];
 
