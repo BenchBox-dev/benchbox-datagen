@@ -7,6 +7,8 @@ PRODUCTS = 26
 ORDERS_PER_SCALE = 8_500_000
 LINES_PER_PERIOD = 156
 ORDERS_PER_PERIOD = 100
+TIME_EXTRACT = "FROM ol.order_time)"
+TIME_EXTRACT_CAST = "FROM CAST(ol.order_time AS TIME))"
 ORDER_LINES = [1] * 60 + [2] * 30 + [3] * 5 + [4] * 4 + [5]
 
 
@@ -29,7 +31,10 @@ def legacy_generate(scale_factor: float, seed: int, out: Path) -> None:
 def queries() -> dict[str, str]:
     from benchbox.core.coffeeshop.queries import CoffeeShopQueryManager
 
-    return CoffeeShopQueryManager().get_all_queries()
+    return {
+        query_id: sql.replace(TIME_EXTRACT, TIME_EXTRACT_CAST)
+        for query_id, sql in CoffeeShopQueryManager().get_all_queries().items()
+    }
 
 
 def benchbox_schema() -> dict:
