@@ -32,3 +32,13 @@ def write_tables(
     parts: int = 1,
     seed: int | None = None,
 ) -> list[FileStat]: ...
+def generate_query(
+    benchmark: str,
+    query: str,
+    template_text: str,
+    distributions_text: str,
+    scale_factor: float,
+    seed: int | None = None,
+    stream: int | None = None,
+    default_params: bool = False,
+) -> tuple[str, list[str]]: ...

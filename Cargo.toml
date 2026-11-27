@@ -32,6 +32,9 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 
+[profile.test.package.benchbox-datagen-core]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

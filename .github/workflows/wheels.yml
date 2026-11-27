@@ -13,6 +13,9 @@ concurrency:
   group: wheels-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  BENCHBOX_REF: 5cae9afda8939c965ba95de7865817e72875879e
+
 jobs:
   build:
     strategy:
@@ -31,6 +34,18 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: BenchBox-dev/benchbox
+          ref: ${{ env.BENCHBOX_REF }}
+          path: benchbox-checkout
+          sparse-checkout: |
+            tests/fixtures/tpc_query_corpus
+            benchbox/_binaries/tpc-h/templates
+          persist-credentials: false
+      - name: Export BENCHBOX_CHECKOUT
+        shell: bash
+        run: echo "BENCHBOX_CHECKOUT=$GITHUB_WORKSPACE/benchbox-checkout" >> "$GITHUB_ENV"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.11"
@@ -68,6 +83,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: BenchBox-dev/benchbox
+          ref: ${{ env.BENCHBOX_REF }}
+          path: benchbox-checkout
+          sparse-checkout: |
+            tests/fixtures/tpc_query_corpus
+            benchbox/_binaries/tpc-h/templates
+          persist-credentials: false
+      - name: Export BENCHBOX_CHECKOUT
+        shell: bash
+        run: echo "BENCHBOX_CHECKOUT=$GITHUB_WORKSPACE/benchbox-checkout" >> "$GITHUB_ENV"
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
         with:
           command: sdist
