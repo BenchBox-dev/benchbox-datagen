@@ -114,6 +114,39 @@ pub(crate) fn plan(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableScale {
+    pub table: &'static str,
+    pub id_count: u64,
+    pub source_rows: u64,
+}
+
+pub(crate) fn table_scales(benchmark: Benchmark, scale_factor: f64) -> Vec<TableScale> {
+    benchmark
+        .tables()
+        .iter()
+        .map(|table| match benchmark {
+            Benchmark::Tpch => {
+                let rows = tpch::row_count(table, scale_factor);
+                TableScale {
+                    table,
+                    id_count: rows,
+                    source_rows: if *table == "lineitem" {
+                        tpch::row_count("orders", scale_factor)
+                    } else {
+                        rows
+                    },
+                }
+            }
+            Benchmark::Tpcds => TableScale {
+                table,
+                id_count: tpcds::id_count(table, scale_factor),
+                source_rows: tpcds::source_rows(table, scale_factor),
+            },
+        })
+        .collect()
+}
+
 pub(crate) fn row_counts(
     benchmark: Benchmark,
     scale_factor: f64,

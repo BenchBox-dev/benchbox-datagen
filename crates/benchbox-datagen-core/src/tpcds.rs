@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::ops::RangeInclusive;
 
 use benchbox_datagen_writers::DelimitedBuffer;
-use tpcdsgen::config::{CompatMode, Session, SessionBuilder, Table};
+use tpcdsgen::config::{CompatMode, Scaling, Session, SessionBuilder, Table};
 use tpcdsgen::row::{
     CallCenterRowGenerator, CatalogPageRowGenerator, CatalogReturnsRowGenerator,
     CatalogSalesRowGenerator, CustomerAddressRowGenerator, CustomerDemographicsRowGenerator,
@@ -49,22 +49,28 @@ pub(crate) const TABLES: [&str; 24] = [
     "web_site",
 ];
 
-pub(crate) const MIN_SCALE_FACTOR: f64 = 1.0;
+pub(crate) const FULL_MODEL_SCALE_FACTOR: f64 = 1.0;
 const FLUSH_BYTES: usize = 1 << 20;
 const SPLIT_THRESHOLD_ROWS: u64 = 1_000_000;
 
+fn scaling(scale_factor: f64) -> Scaling {
+    let scaling = Scaling::new_with_compat(scale_factor, CompatMode::C);
+    if scale_factor >= FULL_MODEL_SCALE_FACTOR {
+        return scaling;
+    }
+    scaling.with_row_counts(TABLES.map(|name| (table(name), source_rows(name, scale_factor))))
+}
+
 fn session(scale_factor: f64) -> Session {
     SessionBuilder::new()
-        .with_scale_factor(scale_factor)
-        .with_compat_mode(CompatMode::C)
+        .with_scaling(scaling(scale_factor))
         .build()
         .expect("scale factor was validated by the caller")
 }
 
 fn chunk_session(scale_factor: f64, part: i32, parts: i32) -> Session {
     SessionBuilder::new()
-        .with_scale_factor(scale_factor)
-        .with_compat_mode(CompatMode::C)
+        .with_scaling(scaling(scale_factor))
         .with_chunk_number(part)
         .with_total_chunks(parts)
         .build()
@@ -101,10 +107,71 @@ pub(crate) fn table(name: &str) -> Table {
     }
 }
 
+const STATIC_BELOW_ONE: [&str; 6] = [
+    "catalog_page",
+    "date_dim",
+    "household_demographics",
+    "income_band",
+    "ship_mode",
+    "time_dim",
+];
+
+fn upstream_rows(name: &str, scale_factor: f64) -> u64 {
+    Scaling::new_with_compat(scale_factor, CompatMode::C).get_row_count(table(name))
+}
+
+pub(crate) fn history_ids(rows: u64) -> u64 {
+    let unique = (rows / 6) * 3;
+    match rows % 6 {
+        1 => unique + 1,
+        2 | 3 => unique + 2,
+        4 | 5 => unique + 3,
+        _ => unique,
+    }
+}
+
 pub(crate) fn source_rows(name: &str, scale_factor: f64) -> u64 {
-    session(scale_factor)
-        .get_scaling()
-        .get_row_count(table(name))
+    if scale_factor >= FULL_MODEL_SCALE_FACTOR {
+        return upstream_rows(name, scale_factor);
+    }
+    if name == "inventory" {
+        let weeks = upstream_rows("inventory", 1.0)
+            / (id_count("item", 1.0) * upstream_rows("warehouse", 1.0));
+        return id_count("item", scale_factor) * source_rows("warehouse", scale_factor) * weeks;
+    }
+    let base = upstream_rows(name, 1.0);
+    if STATIC_BELOW_ONE.contains(&name) {
+        return base;
+    }
+    (((base as f64) * scale_factor) as u64).max(1)
+}
+
+pub(crate) fn id_count(name: &str, scale_factor: f64) -> u64 {
+    let rows = source_rows(name, scale_factor);
+    if table(name).keeps_history() {
+        history_ids(rows)
+    } else {
+        rows
+    }
+}
+
+fn split_work(total_rows: u64, part: i32, parts: i32) -> (u64, u64) {
+    if total_rows < SPLIT_THRESHOLD_ROWS {
+        return if part == 1 { (1, total_rows) } else { (1, 0) };
+    }
+    let (part, parts) = (part as u64, parts as u64);
+    let rowset = total_rows / parts;
+    let extra = total_rows % parts;
+    let mut first = 1 + (part - 1) * rowset;
+    if extra > 0 && part > 1 {
+        first += (part - 1).min(extra);
+    }
+    let count = if extra > 0 && part <= extra {
+        rowset + 1
+    } else {
+        rowset
+    };
+    (first, count)
 }
 
 pub(crate) fn part_range(
@@ -113,7 +180,11 @@ pub(crate) fn part_range(
     part: i32,
     parts: i32,
 ) -> RangeInclusive<u64> {
-    chunk_session(scale_factor, part, parts).get_source_row_range(table(name))
+    if scale_factor >= FULL_MODEL_SCALE_FACTOR {
+        return chunk_session(scale_factor, part, parts).get_source_row_range(table(name));
+    }
+    let (first, count) = split_work(source_rows(name, scale_factor), part, parts);
+    first..=first + count - 1
 }
 
 pub(crate) fn splittable(name: &str, scale_factor: f64) -> bool {
@@ -167,7 +238,7 @@ macro_rules! dispatch {
             sink: &mut W,
         ) -> io::Result<u64> {
             let session = session(scale_factor);
-            let source_rows = session.get_scaling().get_row_count(table(name));
+            let source_rows = source_rows(name, scale_factor);
             match name {
                 $($name => {
                     let mut rows = $generator::new(session, source_rows);
@@ -184,7 +255,7 @@ macro_rules! dispatch {
             range: RangeInclusive<u64>,
         ) -> u64 {
             let session = session(scale_factor);
-            let source_rows = session.get_scaling().get_row_count(table(name));
+            let source_rows = source_rows(name, scale_factor);
             match name {
                 $($name => {
                     let mut rows = $generator::new(session, source_rows);
@@ -239,3 +310,29 @@ dispatch!(
     ("web_sales", WebSalesRowGenerator, WebSalesArrow),
     ("web_site", WebSiteRowGenerator, WebSiteArrow),
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parts_cover_the_scale_model_rows_at_every_scale() {
+        for scale_factor in [0.01, 0.5, 0.999, 1.0] {
+            for name in TABLES {
+                let total = source_rows(name, scale_factor);
+                for parts in [1, 3, 8] {
+                    let mut next = 1;
+                    for part in 1..=parts {
+                        let range = part_range(name, scale_factor, part, parts);
+                        if range.is_empty() {
+                            continue;
+                        }
+                        assert_eq!(*range.start(), next, "{name} {scale_factor} {part}/{parts}");
+                        next = range.end() + 1;
+                    }
+                    assert_eq!(next, total + 1, "{name} {scale_factor} {parts}");
+                }
+            }
+        }
+    }
+}

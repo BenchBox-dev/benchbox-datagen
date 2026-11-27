@@ -2,6 +2,7 @@ mod generate;
 mod output;
 mod pipeline;
 mod qgen;
+mod refresh;
 mod schema;
 mod tpcds;
 mod tpch;
@@ -18,7 +19,7 @@ use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
 pub use benchbox_datagen_writers::Compression;
-pub use generate::KeyRange;
+pub use generate::{KeyRange, TableScale};
 pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
 pub use qgen::{GeneratedQuery, QgenError, QueryRequest, generate_query};
 
@@ -33,6 +34,8 @@ pub enum Error {
     UnknownTable { benchmark: Benchmark, table: String },
     #[error("scale factor must be a positive finite number, got {0}")]
     InvalidScaleFactor(f64),
+    #[error("tpcds scale factors of 1 or more must be whole numbers, got {0}")]
+    NonIntegerScaleFactor(f64),
     #[error("part must be between 1 and parts ({parts}), got {part}")]
     InvalidPart { part: i32, parts: i32 },
     #[error("parts must be at least 1, got {0}")]
@@ -48,12 +51,8 @@ pub enum Error {
     Write(String),
     #[error("{0}")]
     Encode(String),
-    #[error("{benchmark} requires scale factor >= {minimum}, got {scale_factor}")]
-    ScaleFactorBelowMinimum {
-        benchmark: Benchmark,
-        minimum: f64,
-        scale_factor: f64,
-    },
+    #[error("{0}")]
+    RefreshUnsupported(String),
     #[error("generation was cancelled")]
     Cancelled,
 }
@@ -147,6 +146,40 @@ pub fn row_counts_cancellable(
     generate::row_counts(benchmark, scale_factor, workers, cancel)
 }
 
+pub fn write_refresh_sets(
+    benchmark: Benchmark,
+    scale_factor: f64,
+    sets: i32,
+    rng_seed: Option<i32>,
+    output_dir: &std::path::Path,
+    cancel: &AtomicBool,
+) -> Result<Vec<FileStats>, Error> {
+    validate_scale_factor(benchmark, scale_factor)?;
+    if sets < 1 {
+        return Err(Error::RefreshUnsupported(format!(
+            "sets must be at least 1, got {sets}"
+        )));
+    }
+    match benchmark {
+        Benchmark::Tpch => {
+            if rng_seed.is_some() {
+                return Err(Error::RefreshUnsupported(
+                    "tpch refresh sets do not take an rng seed".into(),
+                ));
+            }
+            refresh::write_tpch_refresh(scale_factor, sets, output_dir, cancel)
+        }
+        Benchmark::Tpcds => Err(Error::RefreshUnsupported(
+            "tpcds refresh sets are not available in this build".into(),
+        )),
+    }
+}
+
+pub fn table_scales(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<TableScale>, Error> {
+    validate_scale_factor(benchmark, scale_factor)?;
+    Ok(generate::table_scales(benchmark, scale_factor))
+}
+
 pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
     validate_scale_factor(benchmark, scale_factor)?;
     Ok(generate::key_ranges(benchmark, scale_factor))
@@ -156,12 +189,8 @@ pub(crate) fn validate_scale_factor(benchmark: Benchmark, scale_factor: f64) -> 
     if !scale_factor.is_finite() || scale_factor <= 0.0 {
         return Err(Error::InvalidScaleFactor(scale_factor));
     }
-    if benchmark == Benchmark::Tpcds && scale_factor < tpcds::MIN_SCALE_FACTOR {
-        return Err(Error::ScaleFactorBelowMinimum {
-            benchmark,
-            minimum: tpcds::MIN_SCALE_FACTOR,
-            scale_factor,
-        });
+    if benchmark == Benchmark::Tpcds && scale_factor >= 1.0 && scale_factor.fract() != 0.0 {
+        return Err(Error::NonIntegerScaleFactor(scale_factor));
     }
     Ok(())
 }
@@ -459,22 +488,26 @@ mod tests {
             row_counts_cancellable(Benchmark::Tpcds, 1.0, NonZeroUsize::new(2), &cancelled),
             Err(Error::Cancelled)
         );
+        assert_eq!(
+            row_counts_cancellable(Benchmark::Tpcds, 0.01, NonZeroUsize::new(2), &cancelled),
+            Err(Error::Cancelled)
+        );
     }
 
     #[test]
-    fn tpcds_rejects_fractional_scale_factors() {
-        for scale_factor in [0.5, 0.01, 0.999] {
+    fn tpcds_scale_factors_of_one_or_more_must_be_whole_numbers() {
+        for scale_factor in [1.5, 2.5, 10.000001] {
             assert_eq!(
                 row_counts(Benchmark::Tpcds, scale_factor),
-                Err(Error::ScaleFactorBelowMinimum {
-                    benchmark: Benchmark::Tpcds,
-                    minimum: 1.0,
-                    scale_factor,
-                })
+                Err(Error::NonIntegerScaleFactor(scale_factor))
+            );
+            assert_eq!(
+                table_scales(Benchmark::Tpcds, scale_factor),
+                Err(Error::NonIntegerScaleFactor(scale_factor))
             );
             assert!(matches!(
                 key_ranges(Benchmark::Tpcds, scale_factor),
-                Err(Error::ScaleFactorBelowMinimum { .. })
+                Err(Error::NonIntegerScaleFactor(_))
             ));
             assert!(matches!(
                 record_batches(&TableRequest {
@@ -484,9 +517,62 @@ mod tests {
                     part: 1,
                     parts: 1,
                 }),
-                Err(Error::ScaleFactorBelowMinimum { .. })
+                Err(Error::NonIntegerScaleFactor(_))
             ));
         }
+        for scale_factor in [0.29, 2.0] {
+            assert!(row_counts(Benchmark::Tpcds, scale_factor).is_ok());
+        }
+        assert!(row_counts(Benchmark::Tpch, 1.5).is_ok());
+    }
+
+    #[test]
+    fn tpcds_generation_accepts_fractional_scale_factors() {
+        for scale_factor in [0.5, 0.01, 0.999] {
+            for table in ["item", "customer", "store_returns"] {
+                let mut reader = record_batches(&TableRequest {
+                    benchmark: Benchmark::Tpcds,
+                    table: table.into(),
+                    scale_factor,
+                    part: 1,
+                    parts: 1,
+                })
+                .unwrap();
+                assert!(reader.next().unwrap().unwrap().num_rows() > 0);
+            }
+            assert!(row_counts(Benchmark::Tpcds, scale_factor).is_ok());
+            assert!(key_ranges(Benchmark::Tpcds, scale_factor).is_ok());
+        }
+    }
+
+    #[test]
+    fn tpcds_subscale_model_matches_the_patched_dsdgen_row_counts() {
+        let scales = table_scales(Benchmark::Tpcds, 0.01).unwrap();
+        let find = |table: &str| *scales.iter().find(|scale| scale.table == table).unwrap();
+        assert_eq!(find("store").source_rows, 1);
+        assert_eq!(find("customer").source_rows, 1_000);
+        assert_eq!(find("customer_demographics").source_rows, 19_208);
+        assert_eq!(find("date_dim").source_rows, 73_049);
+        assert_eq!(find("store_sales").source_rows, 2_400);
+        assert_eq!(find("inventory").source_rows, 23_490);
+        let counts: std::collections::HashMap<_, _> = row_counts(Benchmark::Tpcds, 0.01)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(counts["store_sales"], 28_810);
+        assert_eq!(counts["store_returns"], 2_829);
+        let reasons: Vec<u64> = [0.01, 0.1, 0.5, 1.0]
+            .into_iter()
+            .map(|scale_factor| {
+                table_scales(Benchmark::Tpcds, scale_factor)
+                    .unwrap()
+                    .iter()
+                    .find(|scale| scale.table == "reason")
+                    .unwrap()
+                    .source_rows
+            })
+            .collect();
+        assert_eq!(reasons, [1, 7, 37, 75]);
     }
 
     #[test]

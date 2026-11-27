@@ -21,6 +21,7 @@ def table_names(benchmark: str) -> list[str]: ...
 def row_counts(
     benchmark: str, scale_factor: float, threads: int | None = None
 ) -> dict[str, int]: ...
+def table_scales(benchmark: str, scale_factor: float) -> dict[str, dict[str, int]]: ...
 def key_ranges(benchmark: str, scale_factor: float) -> dict[str, dict[str, tuple[int, int]]]: ...
 def write_tables(
     benchmark: str,
@@ -30,6 +31,13 @@ def write_tables(
     compression: str | None = None,
     threads: int | None = None,
     parts: int = 1,
+) -> list[FileStat]: ...
+def write_refresh(
+    benchmark: str,
+    scale_factor: float,
+    output_dir: str | PathLike[str],
+    sets: int = 1,
+    rng_seed: int | None = None,
 ) -> list[FileStat]: ...
 def generate_query(
     benchmark: str,

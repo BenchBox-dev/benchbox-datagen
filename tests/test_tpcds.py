@@ -59,15 +59,43 @@ def test_stream_schemas_equal_the_benchbox_converter_schemas():
 
 
 @pytest.mark.parametrize("scale", [0.01, 0.5, 0.999])
-def test_fractional_scale_factors_are_refused(scale, tmp_path):
-    with pytest.raises(ValueError, match="requires scale factor >= 1"):
-        benchbox_datagen.generate_table("tpcds", "item", scale)
-    with pytest.raises(ValueError, match="requires scale factor >= 1"):
-        benchbox_datagen.row_counts("tpcds", scale)
-    with pytest.raises(ValueError, match="requires scale factor >= 1"):
-        benchbox_datagen.key_ranges("tpcds", scale)
-    with pytest.raises(ValueError, match="requires scale factor >= 1"):
-        benchbox_datagen.write_tables("tpcds", scale, tmp_path)
+def test_fractional_scale_factors_generate_every_table(scale):
+    counts = benchbox_datagen.row_counts("tpcds", scale)
+    for table in TABLES:
+        data = pa.RecordBatchReader.from_stream(benchbox_datagen.generate_table("tpcds", table, scale)).read_all()
+        assert data.num_rows == counts[table], table
+
+
+def test_subscale_parquet_is_independent_of_threads_and_matches_the_stream(tmp_path):
+    runs = [
+        benchbox_datagen.write_tables("tpcds", 0.01, tmp_path / str(threads), threads=threads)
+        for threads in (1, 4, None)
+    ]
+    hashes = [[sha256(s.path) for s in run] for run in runs]
+    assert hashes[0] == hashes[1] == hashes[2]
+    counts = benchbox_datagen.row_counts("tpcds", 0.01)
+    for stat in runs[0]:
+        assert stat.rows == counts[stat.table], stat.table
+        streamed = pa.RecordBatchReader.from_stream(benchbox_datagen.generate_table("tpcds", stat.table, 0.01)).read_all()
+        assert pq.read_table(stat.path).equals(streamed), stat.table
+
+
+def test_subscale_foreign_keys_stay_inside_the_scaled_dimensions():
+    scale = 0.01
+    ranges = benchbox_datagen.key_ranges("tpcds", scale)
+    counts = benchbox_datagen.row_counts("tpcds", scale)
+    store_sales = pa.RecordBatchReader.from_stream(benchbox_datagen.generate_table("tpcds", "store_sales", scale)).read_all()
+    for column, dimension in [
+        ("ss_cdemo_sk", "customer_demographics"),
+        ("ss_addr_sk", "customer_address"),
+        ("ss_customer_sk", "customer"),
+        ("ss_promo_sk", "promotion"),
+        ("ss_store_sk", "store"),
+        ("ss_item_sk", "item"),
+    ]:
+        observed = pc.min_max(store_sales[column]).as_py()
+        assert 1 <= observed["min"] and observed["max"] <= counts[dimension], column
+    assert pc.min_max(store_sales["ss_ticket_number"]).as_py()["max"] == ranges["store_sales"]["ss_ticket_number"][1]
 
 
 def test_row_counts_equal_the_published_scale_factor_one_cardinalities():
@@ -154,3 +182,43 @@ def test_delimited_output_matches_the_committed_dsdgen_hashes(tmp_path):
     for scale, expected in golden.items():
         stats = benchbox_datagen.write_tables("tpcds", float(scale), tmp_path / scale, format="tbl")
         assert {stat.table: sha256(stat.path) for stat in stats} == expected, scale
+
+
+GATE = json.loads((DATA / "tpcds_rowcount_gate.json").read_text())
+
+
+@pytest.mark.parametrize("scale", list(GATE))
+def test_dsqgen_rowcount_inputs_equal_the_patched_dsdgen_values(scale):
+    scales = benchbox_datagen.table_scales("tpcds", float(scale))
+    expected = GATE[scale]
+    assert scales["store"]["id_count"] == expected["store"]
+    assert scales["call_center"]["id_count"] == expected["call_center"]
+    assert scales["reason"]["source_rows"] == expected["reason"]
+    assert scales["customer"]["source_rows"] == expected["customer"]
+    for table in ("store_sales", "web_sales", "catalog_sales"):
+        assert scales[table]["source_rows"] == expected[table], table
+
+
+@pytest.mark.parametrize("scale", [1.5, 2.5])
+def test_non_integer_scale_factors_of_one_or_more_are_rejected(scale):
+    with pytest.raises(ValueError, match="whole numbers"):
+        benchbox_datagen.row_counts("tpcds", scale)
+    with pytest.raises(ValueError, match="whole numbers"):
+        benchbox_datagen.generate_table("tpcds", "item", scale)
+
+
+@pytest.mark.parametrize("scale", [0.29, 2.0])
+def test_fractional_and_integer_scale_factors_are_accepted(scale):
+    assert benchbox_datagen.row_counts("tpcds", scale)["item"] > 0
+
+
+def test_subscale_row_counts_use_the_proportional_model_with_a_one_row_floor():
+    counts = benchbox_datagen.row_counts("tpcds", 0.01)
+    assert counts["store"] == counts["call_center"] == counts["warehouse"] == 1
+    assert counts["customer_demographics"] == 19_208
+    assert counts["date_dim"] == 73_049
+    assert counts["store_sales"] == 28_810
+    assert counts["inventory"] == 23_490
+    assert benchbox_datagen.key_ranges("tpcds", 0.01)["customer"]["c_customer_sk"] == (1, 1_000)
+
+

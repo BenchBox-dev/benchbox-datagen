@@ -8,7 +8,7 @@ use std::time::Duration;
 use benchbox_datagen_core::{
     Benchmark, Error, FileStats, OutputRequest, QueryRequest, TableRequest,
     generate_query as core_generate_query, key_ranges, record_batches, row_counts_cancellable,
-    write_benchmark_cancellable,
+    table_scales, write_benchmark_cancellable, write_refresh_sets,
 };
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -202,6 +202,70 @@ fn row_counts_py<'py>(
     Ok(result)
 }
 
+#[pyfunction]
+#[pyo3(signature = (benchmark, scale_factor, output_dir, sets = 1, rng_seed = None))]
+fn write_refresh(
+    py: Python<'_>,
+    benchmark: &str,
+    scale_factor: f64,
+    output_dir: PathBuf,
+    sets: i32,
+    rng_seed: Option<i32>,
+) -> PyResult<Vec<FileStat>> {
+    let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let cancel = Arc::clone(&cancel);
+        thread::spawn(move || {
+            write_refresh_sets(
+                benchmark,
+                scale_factor,
+                sets,
+                rng_seed,
+                &output_dir,
+                &cancel,
+            )
+        })
+    };
+    while !worker.is_finished() {
+        py.detach(|| thread::sleep(SIGNAL_POLL));
+        if let Err(signal) = py.check_signals() {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = py.detach(|| worker.join());
+            return Err(signal);
+        }
+    }
+    let stats = worker
+        .join()
+        .map_err(|_| PyRuntimeError::new_err("the refresh writer thread panicked"))?
+        .map_err(|error| match error {
+            Error::Write(message) => PyOSError::new_err(message),
+            Error::Cancelled => PyRuntimeError::new_err(error.to_string()),
+            other => value_error(other),
+        })?;
+    Ok(stats.into_iter().map(FileStat::from).collect())
+}
+
+#[pyfunction(name = "table_scales")]
+fn table_scales_py<'py>(
+    py: Python<'py>,
+    benchmark: &str,
+    scale_factor: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
+    let scales = py
+        .detach(|| table_scales(benchmark, scale_factor))
+        .map_err(value_error)?;
+    let result = PyDict::new(py);
+    for scale in scales {
+        let entry = PyDict::new(py);
+        entry.set_item("id_count", scale.id_count)?;
+        entry.set_item("source_rows", scale.source_rows)?;
+        result.set_item(scale.table, entry)?;
+    }
+    Ok(result)
+}
+
 #[pyfunction(name = "key_ranges")]
 fn key_ranges_py<'py>(
     py: Python<'py>,
@@ -268,6 +332,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(write_tables, module)?)?;
     module.add_function(wrap_pyfunction!(row_counts_py, module)?)?;
     module.add_function(wrap_pyfunction!(key_ranges_py, module)?)?;
+    module.add_function(wrap_pyfunction!(table_scales_py, module)?)?;
+    module.add_function(wrap_pyfunction!(write_refresh, module)?)?;
     module.add_function(wrap_pyfunction!(generate_query, module)?)?;
     Ok(())
 }
