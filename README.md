@@ -24,7 +24,7 @@ pinned by exact version. This project does not fork them: fixes go upstream, and
 patch carried until upstream releases it is listed under
 [Carried upstream patches](#carried-upstream-patches).
 
-Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) and SSB (all five tables, any scale factor) as
+Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`), SSB (all five tables, any scale factor) and the `tsbs_devops` synthetic generator (all five tables, any scale factor) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
 `NOT NULL` columns non-nullable). Delimited output is byte-identical to the
@@ -239,6 +239,49 @@ apply `rowcount("active_x", "store")`, which is the smaller of the value and the
 are a data-dependent subset of the matching sales range, so no exact bounds exist
 without generating the returns rows; the bounds of the sales range would be only a
 superset, and are left out so that every reported range is exact.
+
+### TSBS DevOps
+
+Tables, columns, types, value formulas and the comma-separated CSV layout (a
+header row, `.csv` files, timestamps as `YYYY-MM-DD HH:MM:SS`, metric doubles
+with two decimals) follow BenchBox's legacy `TSBSDevOpsDataGenerator`
+(`benchbox/core/tsbs_devops/generator.py`, default 2 days at a 10 second
+interval from 2024-01-01 00:00:00); only the random stream changed. The rows
+are fixed tables whose counts are closed forms of the scale factor, with
+`H = max(10, floor(100 * SF))` hosts and `T = 17,280` timestamps per series:
+
+| Table | Rows | Series layout |
+| :--- | :--- | :--- |
+| `tags` | `H` | `host_0` .. `host_{H-1}`; region, datacenter and rack cycle with the host index, the other tags are drawn |
+| `cpu` | `H * T` | host-major, one series per host |
+| `mem` | `H * T` | host-major, one series per host |
+| `disk` | `2 * H * T` | host-major, devices `sda` then `sdb` per host |
+| `net` | `2 * H * T` | host-major, interfaces `eth0` then `lo` per host |
+
+Scale factors below 0.1 all give the 10-host minimum, so `0.01` and `0.1`
+have identical row counts. `cpu` and `mem` draw per-host constants (the base
+CPU load, the memory size and base utilisation) from a `hosts` stream keyed by
+the host index, and every row from a `fields` stream keyed by the row block.
+The `disk` and `net` counters are running sums over a series, so each series
+has its own stream keyed by the series index and a block replays the series
+from its first step up to the last row the block needs (at most one 17,280-step
+series of extra draws per block, no shared state between blocks). The diurnal
+CPU factor uses the 13 constant sines `sin(k * pi / 12)` rather than a runtime
+sine. Queries are the legacy `TSBSDevOpsQueryManager` queries; the acceptance
+config renders them with 10 hosts, 2 days and seed 42 so that every host the
+queries name exists at every scale. `key_ranges` is empty: the only keys are
+hostnames and timestamps.
+
+The CPU and memory metric doubles are rounded to two decimals when generated
+(the legacy files hold `f"{x:.2f}"` text, which BenchBox's converter turns into
+Parquet), so the Parquet values and the delimited text agree. `tools/synthetic_acceptance.py tsbs_devops ...` (config in
+`tools/synthetic_configs/tsbs_devops.py`) produces the legacy-versus-library
+comparison, the key checks and the 18-query DuckDB/DataFusion agreement that
+gate the frozen goldens in `crates/benchbox-datagen-core/tests/tsbs_devops.rs`.
+Acceptance rules are those of SSB. The config's only exclusion is conditional:
+at the 10-host scales a `tags` column whose value set differs between the five
+legacy seeds themselves is excluded, because no generator can satisfy the
+value-set rule there.
 
 ## Adding a synthetic generator
 
