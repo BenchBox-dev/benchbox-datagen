@@ -2,19 +2,19 @@ use std::collections::HashMap;
 use std::f64::consts::{LN_2, SQRT_2};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use arrow::array::{ArrayRef, Int64Array, StringArray};
-use arrow::compute::concat_batches;
-use arrow::datatypes::SchemaRef;
+use arrow::array::{Array, ArrayRef, Int64Array, StringArray};
+use arrow::compute::{cast, concat};
+use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use tpchgen::generators::OrderGenerator;
 
 use super::rng::Stream;
 use super::{BLOCK_ROWS, Generator, Table, block_len};
-use crate::generate::{KeyRange, Slice, TableScale, key};
-use crate::{Benchmark, conformed, schema, tpch};
+use crate::generate::{self, KeyRange, Slice, TableScale, key};
+use crate::{Benchmark, schema, tpch};
 
 const BENCHMARK: &str = "tpch_skew";
-const CHUNK_DRIVER_UNITS: u64 = 2_048;
+const CHUNK_DRIVER_UNITS: u64 = 512;
 const PARTS_SCALE: u64 = 200_000;
 const SUPPLIERS_SCALE: u64 = 10_000;
 const CUSTOMERS_SCALE: u64 = 150_000;
@@ -307,24 +307,56 @@ impl SkewedTable {
         }
     }
 
-    fn base(&self, start: u64, end: u64) -> RecordBatch {
-        let (first, last) = (self.layout.chunk_of(start), self.layout.chunk_of(end - 1));
-        let batches: Vec<RecordBatch> = (first..=last)
-            .flat_map(|chunk| {
-                let slice = Slice::Tpch {
-                    part: chunk as i32 + 1,
-                    parts: self.layout.parts,
-                };
-                conformed(Benchmark::Tpch, self.table, self.scale_factor, &slice)
-            })
-            .map(|batch| batch.expect("TPC-H batches are generated in memory"))
+    fn base(&self, start: u64, end: u64) -> Vec<Option<ArrayRef>> {
+        let fields = self.schema.fields();
+        let replaced: Vec<bool> = (0..fields.len())
+            .map(|index| self.skews.iter().any(|(position, ..)| *position == index))
             .collect();
-        concat_batches(&self.schema, &batches)
-            .expect("chunks share the TPC-H schema")
-            .slice(
-                (start - self.layout.bounds[first]) as usize,
-                (end - start) as usize,
-            )
+        let mut pieces: Vec<Vec<ArrayRef>> = vec![Vec::new(); fields.len()];
+        let (first, last) = (self.layout.chunk_of(start), self.layout.chunk_of(end - 1));
+        for chunk in first..=last {
+            let slice = Slice::Tpch {
+                part: chunk as i32 + 1,
+                parts: self.layout.parts,
+            };
+            let mut row = self.layout.bounds[chunk];
+            for batch in generate::batches(Benchmark::Tpch, self.table, self.scale_factor, &slice) {
+                let batch = batch.expect("TPC-H batches are generated in memory");
+                let rows = batch.num_rows() as u64;
+                let (from, to) = (row.max(start), (row + rows).min(end));
+                if from < to {
+                    let part = batch.slice((from - row) as usize, (to - from) as usize);
+                    for (index, column) in part.columns().iter().enumerate() {
+                        if !replaced[index] {
+                            pieces[index].push(conform(column, fields[index].data_type()));
+                        }
+                    }
+                }
+                row += rows;
+                if row >= end {
+                    break;
+                }
+            }
+        }
+        pieces
+            .into_iter()
+            .map(|column| match column.len() {
+                0 => None,
+                1 => Some(column[0].clone()),
+                _ => {
+                    let refs: Vec<&dyn Array> = column.iter().map(|array| array.as_ref()).collect();
+                    Some(concat(&refs).expect("pieces share the TPC-H column type"))
+                }
+            })
+            .collect()
+    }
+}
+
+fn conform(column: &ArrayRef, target: &DataType) -> ArrayRef {
+    if column.data_type() == target {
+        column.clone()
+    } else {
+        cast(column, target).expect("TPC-H columns cast to the BenchBox types")
     }
 }
 
@@ -340,11 +372,14 @@ impl Table for SkewedTable {
     fn block(&self, index: u64) -> RecordBatch {
         let start = index * BLOCK_ROWS;
         let rows = block_len(self.rows(), index);
-        let base = self.base(start, start + rows as u64);
-        let mut columns = base.columns().to_vec();
+        let mut columns = self.base(start, start + rows as u64);
         for (position, stream, skew) in &self.skews {
-            columns[*position] = skew.column(stream, index, rows);
+            columns[*position] = Some(skew.column(stream, index, rows));
         }
+        let columns = columns
+            .into_iter()
+            .map(|column| column.expect("every column is unchanged or replaced"))
+            .collect();
         RecordBatch::try_new(self.schema.clone(), columns)
             .expect("skewed columns keep the TPC-H types")
     }
