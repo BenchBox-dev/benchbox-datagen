@@ -1,0 +1,12 @@
+{
+ "vector_queries": [
+  ["query_id", "int64", false],
+  ["query_vector", "fixed_size_list<item: float>[128]", false]
+ ],
+ "vectors": [
+  ["id", "int64", false],
+  ["embedding", "fixed_size_list<item: float>[128]", false],
+  ["category", "string", false],
+  ["doc_id", "string", false]
+ ]
+}

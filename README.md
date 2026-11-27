@@ -24,7 +24,7 @@ pinned by exact version. This project does not fork them: fixes go upstream, and
 patch carried until upstream releases it is listed under
 [Carried upstream patches](#carried-upstream-patches).
 
-Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) and SSB (all five tables, any scale factor) as
+Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) SSB (all five tables, any scale factor) and `vector_search` (both tables, any scale factor) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
 `NOT NULL` columns non-nullable). Delimited output is byte-identical to the
@@ -239,6 +239,37 @@ apply `rowcount("active_x", "store")`, which is the smaller of the value and the
 are a data-dependent subset of the matching sales range, so no exact bounds exist
 without generating the returns rows; the bounds of the sales range would be only a
 superset, and are left out so that every reported range is exact.
+
+### vector_search
+
+Tables, columns, types and value domains follow BenchBox's legacy
+`VectorSearchDataGenerator` (`numpy.random.default_rng(42)`); only the random
+stream changed.
+
+| Table | Rows at scale factor `SF` | Columns |
+| :--- | :--- | :--- |
+| `vectors` | `max(1, floor(1,000,000 * SF))` | `id` (1 to N), `embedding` (`fixed_size_list<float>[128]`), `category` (`category_01` to `category_10`), `doc_id` (`doc_<id>`) |
+| `vector_queries` | 100 at every scale factor | `query_id` (1 to 100), `query_vector` (`fixed_size_list<float>[128]`) |
+
+`category` is `category_{id % 10 + 1:02d}` and `doc_id` is `doc_{id}`, exactly as
+in the legacy generator; only the embeddings are random. Each vector is 128
+independent standard normal draws divided by the Euclidean norm of the row (unit
+length), drawn per 65,536-row block from the `embedding` stream of its table.
+The normals come from the Marsaglia polar method; its logarithm is
+`libm::log`, so nothing depends on the platform's floating-point library. The
+dimension is fixed at 128 (the legacy `dimensions` constructor option is not a
+scale and is not supported). Delimited output is the legacy file form: `|`
+delimiter, a header row, `.csv` extension, `[v1,v2,...]` vectors with each
+element at `%.6g`. `vector_queries` is a single small file and is never split
+into parts. The query vectors do not depend on the scale factor.
+
+`tools/synthetic_acceptance.py vector_search ...` (config in
+`tools/synthetic_configs/vector_search.py`) produces the legacy-versus-library
+comparison and the DuckDB/DataFusion agreement that gate the frozen goldens in
+`crates/benchbox-datagen-core/tests/vector_search.rs`. The config's queries are
+engine-neutral rewrites of the six BenchBox queries (cosine and L2 scores from
+`unnest` and `sum`, `id` only, because DuckDB reads Parquet vectors as lists and
+the two engines share no vector function and no bit-identical float score).
 
 ## Adding a synthetic generator
 

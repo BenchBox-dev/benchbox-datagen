@@ -261,6 +261,7 @@ dependencies = [
  "benchbox-datagen-writers",
  "flate2",
  "itoa",
+ "libm",
  "parquet",
  "rand_chacha",
  "serde_json",
