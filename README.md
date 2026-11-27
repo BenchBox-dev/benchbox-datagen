@@ -163,7 +163,8 @@ key `((n >> 3) << 5) + (n & 7)`, the reference `mk_sparse` mapping for the paper
 byte-identical to legacy `date.tbl` for its 2,556 rows, apart from line endings
 (the legacy writer emits CRLF) and the legacy 2,557th row.
 
-`tools/ssb_acceptance.py` produces the legacy-versus-library comparison,
+`tools/synthetic_acceptance.py ssb ...` (config in `tools/synthetic_configs/ssb.py`)
+produces the legacy-versus-library comparison,
 foreign-key and uniqueness checks and the 13-query DuckDB/DataFusion agreement
 that gate the frozen goldens in `crates/benchbox-datagen-core/tests/ssb.rs`.
 
@@ -179,6 +180,49 @@ on seeds 42-46. A query that legacy leaves empty on any of seeds 42-46 is judged
 on 30 seeds per side (42-71) at that scale: the library fails only if its
 empty-seed count is higher than legacy's with one-sided Fisher exact p < 0.001
 (5 against 5 seeds cannot reach that p-value).
+
+## Adding a synthetic generator
+
+A synthetic generator is one Rust module plus one registry entry, one Python
+config file and one schema file; nothing else is edited.
+
+1. **Module.** Add `crates/benchbox-datagen-core/src/synthetic/<name>.rs` with a
+   unit struct that implements `synthetic::Generator`: `name`, `tables`,
+   `schema` (build it with `schema::build` from a column list kept in the
+   module), `row_count`, `open` (returns a `Table` whose `block(index)` is a
+   pure function of the block index and the seed), `key_ranges`, and, only when
+   the defaults are wrong, `splittable` (default: every table splits) and
+   `table_scales` (default: `id_count == source_rows == row_count`). Refresh
+   sets are unsupported for every synthetic benchmark.
+2. **Registry.** In `synthetic/mod.rs` add `mod <name>;` and append
+   `&<name>::<Struct>` to `REGISTRY`. This is the only shared line; Python
+   names, `table_names`, `row_counts`, `table_scales`, `key_ranges`, the seed
+   default, `write_tables` and `generate_table` all follow from it.
+3. **Schema file.** Add `tests/data/<name>_arrow_schemas.json`, produced with
+   `tools/dump_benchbox_schemas.py <name>` from the BenchBox schema, and a
+   Rust test with frozen SHA-256 goldens for `tbl` and `parquet` at the gate
+   scales (see `crates/benchbox-datagen-core/tests/ssb.rs`).
+4. **Config.** Add `tools/synthetic_configs/<name>.py` that defines `CONFIG =
+   SyntheticConfig(...)`: tables, primary and foreign keys, `expected_rows`,
+   the queries (a JSON `{id: sql}` file path or a callable), the legacy
+   generator, `benchbox_schema` (for the schema dump tool), the budgets used by
+   `tools/bench_budgets.py`, and the exclusions. Config files are discovered by
+   file name, so no list needs editing. Every exclusion (column, whole table or
+   data-dependent) needs a written reason; a blank reason raises.
+5. **Evidence.** Run, for each scale in the config, `tools/synthetic_acceptance.py
+   <name> legacy`, `library` (the same seeds), `compare` (add `*_queries`
+   files for seeds 47-71 when legacy leaves a query empty) and `verify`, then
+   `report`, and put the report in the PR. Required results, unchanged from
+   SSB: every metric inside the legacy min-max or the 99.9% prediction
+   interval of 5 legacy seeds (boundary quantiles of low-cardinality columns
+   may pass by rank); queries never empty in legacy never empty in the
+   library, otherwise 30 seeds per side with one-sided Fisher p >= 0.001; no
+   orphan or duplicate keys; every query returns the same rows in DuckDB and
+   DataFusion; wall-time and peak-RSS budgets met. Also run
+   `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
+   `pytest tests` and `python3 tools/third_party_licenses.py --check`.
+6. **Docs.** Add a section for the benchmark to this README next to SSB
+   (tables, row-count rules, sources) and add it to the list at the top.
 
 ## Layout
 

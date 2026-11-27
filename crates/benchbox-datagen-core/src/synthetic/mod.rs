@@ -12,9 +12,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
-use crate::{Benchmark, schema};
-
-pub(crate) use ssb::date_key_bounds as ssb_date_key_bounds;
+use crate::generate::{KeyRange, TableScale};
 
 pub(crate) const BLOCK_ROWS: u64 = 65_536;
 pub(crate) const DEFAULT_SEED: u64 = 42;
@@ -33,27 +31,46 @@ pub(crate) fn block_len(rows: u64, block: u64) -> usize {
     (rows - block * BLOCK_ROWS).min(BLOCK_ROWS) as usize
 }
 
-pub(crate) fn row_count(benchmark: Benchmark, table: &str, scale_factor: f64) -> u64 {
-    match benchmark {
-        Benchmark::Ssb => ssb::row_count(table, scale_factor),
-        Benchmark::Tpch | Benchmark::Tpcds => unreachable!("only SSB is a synthetic benchmark"),
+pub(crate) trait Generator: Sync {
+    fn name(&self) -> &'static str;
+    fn tables(&self) -> &'static [&'static str];
+    fn schema(&self, table: &str) -> Option<SchemaRef>;
+    fn row_count(&self, table: &str, scale_factor: f64) -> u64;
+    fn open(&self, table: &str, scale_factor: f64, seed: u64) -> Arc<dyn Table>;
+    fn key_ranges(&self, scale_factor: f64) -> Vec<KeyRange>;
+
+    fn splittable(&self, _table: &str) -> bool {
+        true
+    }
+
+    fn table_scales(&self, scale_factor: f64) -> Vec<TableScale> {
+        self.tables()
+            .iter()
+            .map(|table| {
+                let rows = self.row_count(table, scale_factor);
+                TableScale {
+                    table,
+                    id_count: rows,
+                    source_rows: rows,
+                }
+            })
+            .collect()
     }
 }
 
-pub(crate) fn open(
-    benchmark: Benchmark,
-    table: &str,
-    scale_factor: f64,
-    seed: u64,
-) -> Arc<dyn Table> {
-    match benchmark {
-        Benchmark::Ssb => ssb::open(table, scale_factor, seed),
-        Benchmark::Tpch | Benchmark::Tpcds => unreachable!("only SSB is a synthetic benchmark"),
-    }
-}
+const REGISTRY: &[&dyn Generator] = &[&ssb::Ssb];
 
-pub(crate) fn splittable(table: &str) -> bool {
-    table != "date"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyntheticId(usize);
+
+impl SyntheticId {
+    pub(crate) fn all() -> impl Iterator<Item = SyntheticId> {
+        (0..REGISTRY.len()).map(SyntheticId)
+    }
+
+    pub(crate) fn generator(self) -> &'static dyn Generator {
+        REGISTRY[self.0]
+    }
 }
 
 pub(crate) fn part_rows(rows: u64, part: i32, parts: i32) -> (u64, u64) {
@@ -138,13 +155,34 @@ pub(crate) fn write_delimited<W: Write>(
     Ok(rows)
 }
 
-pub(crate) fn ssb_schema(table: &str) -> SchemaRef {
-    schema::ssb(table).expect("every SSB table has a schema")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_registered_generator_is_consistent() {
+        let mut names = std::collections::HashSet::new();
+        for id in SyntheticId::all() {
+            let generator = id.generator();
+            assert!(names.insert(generator.name()), "duplicate name");
+            assert!(!generator.tables().is_empty());
+            for scale_factor in [0.01, 1.0] {
+                for table in generator.tables() {
+                    let schema = generator.schema(table).expect("every table has a schema");
+                    let source = generator.open(table, scale_factor, DEFAULT_SEED);
+                    assert_eq!(source.schema(), schema);
+                    assert_eq!(source.rows(), generator.row_count(table, scale_factor));
+                }
+                let scales = generator.table_scales(scale_factor);
+                assert_eq!(scales.len(), generator.tables().len());
+                for range in generator.key_ranges(scale_factor) {
+                    let schema = generator.schema(range.table).expect("key table exists");
+                    assert!(schema.field_with_name(range.column).is_ok());
+                    assert!(range.min <= range.max);
+                }
+            }
+        }
+    }
 
     #[test]
     fn parts_cover_every_row_exactly_once() {
