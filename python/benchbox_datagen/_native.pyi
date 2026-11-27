@@ -15,7 +15,7 @@ class FileStat:
     bytes: int
 
 def generate_table(
-    benchmark: str, table: str, scale_factor: float, part: int = 1, parts: int = 1
+    benchmark: str, table: str, scale_factor: float, part: int = 1, parts: int = 1, seed: int | None = None
 ) -> TableStream: ...
 def table_names(benchmark: str) -> list[str]: ...
 def row_counts(
@@ -32,6 +32,7 @@ def write_tables(
     compression: str | None = None,
     threads: int | None = None,
     parts: int = 1,
+    seed: int | None = None,
 ) -> list[FileStat]: ...
 def write_refresh(
     benchmark: str,

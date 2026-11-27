@@ -13,10 +13,13 @@ repository = "https://github.com/BenchBox-dev/benchbox-datagen"
 arrow = { version = "60", default-features = false }
 benchbox-datagen-core = { path = "crates/benchbox-datagen-core" }
 benchbox-datagen-writers = { path = "crates/benchbox-datagen-writers" }
+itoa = "1"
 parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "flate2-zlib-rs"] }
 tempfile = "3"
 pyo3 = { version = "0.30", features = ["abi3-py311"] }
 pyo3-arrow = "0.21"
+rand_chacha = "=0.10.0"
+sha2 = "0.11"
 thiserror = "2"
 tpcdsgen = "=4.0.0"
 tpcdsgen-arrow = { version = "=4.0.0", default-features = false, features = ["arrow_60"] }
