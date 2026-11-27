@@ -1,11 +1,10 @@
 use std::io::{self, Write};
 use std::ops::RangeInclusive;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
+use std::sync::atomic::AtomicBool;
 
 use arrow::datatypes::SchemaRef;
 
-use crate::{BatchReader, Benchmark, schema, tpcds, tpch};
+use crate::{BatchReader, Benchmark, Error, pipeline, schema, tpcds, tpch};
 
 #[derive(Debug, Clone)]
 pub(crate) enum Slice {
@@ -115,21 +114,31 @@ pub(crate) fn plan(
     }
 }
 
-pub(crate) fn row_counts(benchmark: Benchmark, scale_factor: f64) -> Vec<(&'static str, u64)> {
+pub(crate) fn row_counts(
+    benchmark: Benchmark,
+    scale_factor: f64,
+    workers: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<(&'static str, u64)>, Error> {
     benchmark
         .tables()
         .iter()
         .map(|table| {
             let rows = match benchmark {
                 Benchmark::Tpch => tpch::row_count(table, scale_factor),
-                Benchmark::Tpcds => tpcds_row_count(table, scale_factor),
+                Benchmark::Tpcds => tpcds_row_count(table, scale_factor, workers, cancel)?,
             };
-            (*table, rows)
+            Ok((*table, rows))
         })
         .collect()
 }
 
-fn tpcds_row_count(table: &str, scale_factor: f64) -> u64 {
+fn tpcds_row_count(
+    table: &str,
+    scale_factor: f64,
+    workers: usize,
+    cancel: &AtomicBool,
+) -> Result<u64, Error> {
     let generated = matches!(
         table,
         "store_sales"
@@ -140,31 +149,28 @@ fn tpcds_row_count(table: &str, scale_factor: f64) -> u64 {
             | "web_returns"
     );
     if !generated {
-        return tpcds::source_rows(table, scale_factor);
+        return Ok(tpcds::source_rows(table, scale_factor));
     }
     let slices = plan(Benchmark::Tpcds, table, scale_factor, Some(25_000));
-    let next = AtomicUsize::new(0);
-    let workers = thread::available_parallelism().map_or(1, |count| count.get());
-    thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut rows = 0;
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(Slice::Tpcds(range)) = slices.get(index) else {
-                            return rows;
-                        };
-                        rows += tpcds::count_rows(table, scale_factor, range.clone());
-                    }
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("row counting does not panic"))
-            .sum()
-    })
+    let mut total = 0;
+    pipeline::ordered(
+        slices.len(),
+        workers,
+        workers * 2,
+        cancel,
+        || Error::Cancelled,
+        |index| {
+            let Slice::Tpcds(range) = &slices[index] else {
+                unreachable!("TPC-DS plans contain only TPC-DS slices")
+            };
+            Ok(tpcds::count_rows(table, scale_factor, range.clone()))
+        },
+        |rows: u64| {
+            total += rows;
+            Ok(())
+        },
+    )?;
+    Ok(total)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,7 +6,10 @@ mod tpcds;
 mod tpch;
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
+use std::thread;
 
 use arrow::compute::cast;
 use arrow::datatypes::SchemaRef;
@@ -122,12 +125,28 @@ pub fn table_schema(benchmark: Benchmark, table: &str) -> Result<SchemaRef, Erro
     Ok(generate::schema(benchmark, benchmark.table(table)?))
 }
 
+/// TPC-H counts are closed-form. TPC-DS sales and returns counts are produced by
+/// running the generator over every line item, so their cost grows with the scale factor.
 pub fn row_counts(
     benchmark: Benchmark,
     scale_factor: f64,
 ) -> Result<Vec<(&'static str, u64)>, Error> {
+    row_counts_cancellable(benchmark, scale_factor, None, &AtomicBool::new(false))
+}
+
+/// Like [`row_counts`], using `threads` workers (all cores by default) and stopping with
+/// [`Error::Cancelled`] once `cancel` is set.
+pub fn row_counts_cancellable(
+    benchmark: Benchmark,
+    scale_factor: f64,
+    threads: Option<NonZeroUsize>,
+    cancel: &AtomicBool,
+) -> Result<Vec<(&'static str, u64)>, Error> {
     validate_scale_factor(benchmark, scale_factor)?;
-    Ok(generate::row_counts(benchmark, scale_factor))
+    let workers = threads
+        .or_else(|| thread::available_parallelism().ok())
+        .map_or(1, NonZeroUsize::get);
+    generate::row_counts(benchmark, scale_factor, workers, cancel)
 }
 
 pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
@@ -413,6 +432,35 @@ mod tests {
             table_schema(Benchmark::Tpcds, "dbgen_version"),
             Err(Error::UnknownTable { .. })
         ));
+    }
+
+    #[test]
+    fn tpcds_upstream_field_names_equal_the_target_names() {
+        for table in Benchmark::Tpcds.tables() {
+            let upstream =
+                generate::batches(Benchmark::Tpcds, table, 1.0, &generate::Slice::Tpcds(1..=1))
+                    .schema();
+            let names: Vec<_> = upstream
+                .fields()
+                .iter()
+                .map(|field| field.name().replace("s_tax_precentage", "s_tax_percentage"))
+                .collect();
+            let target: Vec<_> = generate::schema(Benchmark::Tpcds, table)
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect();
+            assert_eq!(names, target, "{table}");
+        }
+    }
+
+    #[test]
+    fn tpcds_row_counts_stop_when_cancelled() {
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            row_counts_cancellable(Benchmark::Tpcds, 1.0, NonZeroUsize::new(2), &cancelled),
+            Err(Error::Cancelled)
+        );
     }
 
     #[test]

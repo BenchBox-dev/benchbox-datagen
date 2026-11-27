@@ -74,8 +74,16 @@ for file in files:
 compression=None, threads=None, parts=1)` writes one `<table>.<format>` file per
 table (`format` is `"parquet"` or `"tbl"`; Parquet compression is `"none"`,
 `"snappy"` (default), `"gzip"` or `"zstd"`; `.tbl` is uncompressed). With
-`parts > 1` each table except `nation` and `region` is split into
-`<table>.<format>.<part>` files (for example `lineitem.tbl.3`, the same shard naming BenchBox uses). `threads=None` uses every available CPU.
+`parts > 1` each table is split into `<table>.<format>.<part>` files (for example
+`lineitem.tbl.3`, the same shard naming BenchBox uses), except TPC-H `nation` and
+`region` and, for TPC-DS, every table with fewer than 1,000,000 source rows (at scale
+factor 1 only `customer_demographics` and `inventory` are split). `threads=None` uses
+every available CPU.
+
+`row_counts(benchmark, scale_factor, threads=None)` is closed-form for TPC-H. For TPC-DS
+the sales and returns counts come from running the generator over every line item, so
+the cost grows with the scale factor (about 0.2 s at scale factor 1 on all cores); it
+uses `threads` workers and responds to Ctrl-C.
 
 ## Layout
 

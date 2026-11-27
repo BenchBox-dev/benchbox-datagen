@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use benchbox_datagen_core::{
     Benchmark, Error, FileStats, OutputRequest, TableRequest, key_ranges, record_batches,
-    row_counts, write_benchmark_cancellable,
+    row_counts_cancellable, write_benchmark_cancellable,
 };
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -113,13 +113,7 @@ fn write_tables(
     threads: Option<usize>,
     parts: i32,
 ) -> PyResult<Vec<FileStat>> {
-    let threads = match threads {
-        None => None,
-        Some(count) => Some(
-            NonZeroUsize::new(count)
-                .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))?,
-        ),
-    };
+    let threads = non_zero_threads(threads)?;
     let request = OutputRequest {
         benchmark: benchmark.parse().map_err(value_error)?,
         scale_factor,
@@ -161,16 +155,45 @@ fn write_tables(
     Ok(stats.into_iter().map(FileStat::from).collect())
 }
 
+fn non_zero_threads(threads: Option<usize>) -> PyResult<Option<NonZeroUsize>> {
+    threads
+        .map(|count| {
+            NonZeroUsize::new(count)
+                .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))
+        })
+        .transpose()
+}
+
 #[pyfunction(name = "row_counts")]
+#[pyo3(signature = (benchmark, scale_factor, threads = None))]
 fn row_counts_py<'py>(
     py: Python<'py>,
     benchmark: &str,
     scale_factor: f64,
+    threads: Option<usize>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
-    let counts = py
-        .detach(|| row_counts(benchmark, scale_factor))
-        .map_err(value_error)?;
+    let threads = non_zero_threads(threads)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let cancel = Arc::clone(&cancel);
+        thread::spawn(move || row_counts_cancellable(benchmark, scale_factor, threads, &cancel))
+    };
+    while !worker.is_finished() {
+        py.detach(|| thread::sleep(SIGNAL_POLL));
+        if let Err(signal) = py.check_signals() {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = py.detach(|| worker.join());
+            return Err(signal);
+        }
+    }
+    let counts = worker
+        .join()
+        .map_err(|_| PyRuntimeError::new_err("the row counting thread panicked"))?
+        .map_err(|error| match error {
+            Error::Cancelled => PyRuntimeError::new_err(error.to_string()),
+            other => value_error(other),
+        })?;
     let result = PyDict::new(py);
     for (table, rows) in counts {
         result.set_item(table, rows)?;
