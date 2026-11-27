@@ -36,6 +36,7 @@ class SyntheticConfig:
     legacy_suffix: str = "tbl"
     legacy_delimiter: str = "|"
     legacy_header: bool = False
+    legacy_nullstr: str | None = None
     schema_path: Path | None = None
     distribution_scales: tuple[float, ...] = (0.1, 1.0)
     query_scales: tuple[float, ...] = (0.01, 0.1, 1.0)

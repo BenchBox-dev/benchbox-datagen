@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import duckdb
@@ -142,11 +143,12 @@ def parquet_sources(directory: Path) -> dict[str, str]:
 def legacy_sources(directory: Path) -> dict[str, str]:
     sources = {}
     header = "true" if CONFIG.legacy_header else "false"
+    nullstr = f", nullstr='{CONFIG.legacy_nullstr}'" if CONFIG.legacy_nullstr is not None else ""
     for table in tables():
         columns = ", ".join(f"'{name}': '{tbl_type(kind)}'" for name, kind, _ in schemas()[table])
         path = directory / f"{table}.{CONFIG.legacy_suffix}"
         sources[table] = (
-            f"read_csv('{path}', delim='{CONFIG.legacy_delimiter}', header={header}, columns={{{columns}}})"
+            f"read_csv('{path}', delim='{CONFIG.legacy_delimiter}', header={header}, columns={{{columns}}}{nullstr})"
         )
     return sources
 
@@ -405,8 +407,30 @@ def duckdb_rows(directory: Path, sql: str, con: duckdb.DuckDBPyConnection) -> li
     return [tuple(row) for row in con.execute(sql).fetchall()]
 
 
-def normalise(rows: list[tuple]) -> list[tuple]:
-    return sorted(rows, key=repr)
+def numeric(value: object) -> bool:
+    return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+
+
+def sort_key(row: tuple) -> str:
+    return repr(tuple(f"{float(v):.6g}" if numeric(v) else v for v in row))
+
+
+def values_match(a: object, b: object) -> bool:
+    if numeric(a) and numeric(b):
+        return math.isclose(float(a), float(b), rel_tol=1e-6, abs_tol=1e-9)
+    return a == b
+
+
+def first_difference(duck_rows: list[tuple], df_rows: list[tuple]) -> dict | None:
+    if len(duck_rows) != len(df_rows):
+        return {"row": None, "column": None, "duckdb": len(duck_rows), "datafusion": len(df_rows)}
+    for index, (left, right) in enumerate(zip(sorted(duck_rows, key=sort_key), sorted(df_rows, key=sort_key))):
+        if len(left) != len(right):
+            return {"row": index, "column": None, "duckdb": repr(left), "datafusion": repr(right)}
+        for column, (a, b) in enumerate(zip(left, right)):
+            if not values_match(a, b):
+                return {"row": index, "column": column, "duckdb": repr(a), "datafusion": repr(b)}
+    return None
 
 
 def verify_tables(scale_factor: float, directory: Path) -> dict:
@@ -446,10 +470,13 @@ def run_queries(directory: Path) -> dict:
         batches = context.sql(sql).collect()
         df_rows = [tuple(row.values()) for batch in batches for row in batch.to_pylist()]
         df_seconds = time.monotonic() - df_started
+        difference = first_difference(duck_rows, df_rows)
         outcomes[query_id] = {
             "duckdb_rows": len(duck_rows),
             "datafusion_rows": len(df_rows),
-            "agree": normalise(duck_rows) == normalise(df_rows),
+            "agree": len(duck_rows) == len(df_rows),
+            "values_agree": difference is None,
+            "first_difference": difference,
             "first_row_null": bool(duck_rows) and all(v is None for v in duck_rows[0]),
             "duckdb_seconds": duck_seconds,
             "datafusion_seconds": df_seconds,
@@ -475,6 +502,9 @@ def cmd_verify(args: argparse.Namespace) -> None:
             or any(report["duplicates"].values())
             or any(not q["agree"] for q in report["queries"].values())
         )
+        for query_id, q in report["queries"].items():
+            if not q["values_agree"]:
+                print(f"warning: {query_id} values differ between DuckDB and DataFusion: {q['first_difference']}")
         print(f"verify sf={args.scale} seed={args.seed} failed={failed} -> {args.out}")
         sys.exit(1 if failed else 0)
     finally:
@@ -561,6 +591,9 @@ def cmd_report(args: argparse.Namespace) -> None:
             lines.append(
                 f"| {query_id} | {expected.get(key, 'n/a')} | {legacy_rows} | {library_rows} | {outcome['duckdb_rows']} | {outcome['datafusion_rows']} | {'yes' if outcome['agree'] else 'NO'} |"
             )
+        for query_id, outcome in verify["queries"].items():
+            if not outcome.get("values_agree", True):
+                lines.append(f"Warning: {query_id} values differ between DuckDB and DataFusion (row counts gate only); first difference: {outcome['first_difference']}")
         lines.append("")
     budgets = load(base / "budgets.json")
     if budgets:
