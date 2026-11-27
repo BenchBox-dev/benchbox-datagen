@@ -21,6 +21,17 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
+    pub(crate) fn field(self, name: &str, nullable: bool) -> Field {
+        let field = Field::new(name, self.data_type(), nullable);
+        match self {
+            Kind::Fixed(scale) => field.with_metadata(HashMap::from([(
+                FIXED_SCALE_KEY.to_owned(),
+                scale.to_string(),
+            )])),
+            _ => field,
+        }
+    }
+
     fn data_type(self) -> DataType {
         match self {
             Kind::Int => DataType::Int64,
@@ -43,6 +54,8 @@ impl Kind {
 
 #[allow(unused_imports)]
 pub(crate) use Kind::*;
+
+pub(crate) const FIXED_SCALE_KEY: &str = "benchbox.fixed_scale";
 
 pub(crate) type Column = (&'static str, Kind, bool);
 
@@ -150,24 +163,13 @@ const TPCH: [(&str, &[Column]); 8] = [
     ),
 ];
 
-#[allow(dead_code)]
-pub(crate) fn fixed_scales(columns: &[Column]) -> Vec<(&'static str, u8)> {
-    columns
-        .iter()
-        .filter_map(|(name, kind, _)| match kind {
-            Kind::Fixed(scale) => Some((*name, *scale)),
-            _ => None,
-        })
-        .collect()
-}
-
 pub(crate) fn build(tables: &[(&'static str, &[Column])]) -> HashMap<&'static str, SchemaRef> {
     tables
         .iter()
         .map(|(table, columns)| {
             let fields: Vec<Field> = columns
                 .iter()
-                .map(|(name, kind, nullable)| Field::new(*name, kind.data_type(), *nullable))
+                .map(|(name, kind, nullable)| kind.field(name, *nullable))
                 .collect();
             (*table, Arc::new(Schema::new(fields)) as SchemaRef)
         })

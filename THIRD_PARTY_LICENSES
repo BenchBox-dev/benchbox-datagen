@@ -4114,3 +4114,21 @@ No Warranty
     OR OTHERWISE, ARISING IN ANY WAY OUT OF THIS OR ANY OTHER AGREEMENT
     RELATING TO THE WORK, WHETHER OR NOT SUCH AUTHOR OR DEVELOPER HAD
     ADVANCE NOTICE OF THE POSSIBILITY OF SUCH DAMAGES.
+
+================================================================================
+TPC-DERIVED FILES in benchbox-datagen (TPC-DS 4.0.0 kit)
+
+The following files are derived from the TPC-DS 4.0.0 kit (dsdgen, its distribution
+files and column list), a Work covered by the TPC legal notice above. The notice
+applies to them:
+
+- crates/benchbox-datagen-core/src/tpcds_update/columns.rs: generated from tools/column_list.txt of the TPC-DS 4.0.0 kit (the column list mkheader turns into dsdgen's columns.h)
+- crates/benchbox-datagen-core/src/tpcds_update/dims.rs: the scaling.dst row-count weights (row_spec, source_table_rows), the zip-to-GMT offset table (GMT_OFFSETS) and dimension source-table generators ported from dsdgen
+- crates/benchbox-datagen-core/src/tpcds_update/scd.rs: slowly-changing dimension source-table generators ported from dsdgen
+- crates/benchbox-datagen-core/src/tpcds_update/orders.rs: purchase, catalog order and web order source-table generators ported from dsdgen
+- crates/benchbox-datagen-core/src/tpcds_update/plan.rs: update-date selection and per-day row scaling ported from dsdgen
+- crates/benchbox-datagen-core/src/tpcds_update/calendar.rs: calendar and date routines ported from dsdgen, reading calendar.dst
+- crates/benchbox-datagen-core/src/tpcds_update/ctx.rs: join-key and catalog-page routines ported from dsdgen
+- crates/benchbox-datagen-core/src/tpcds_update/rng.rs: random-stream seeding by column number ported from dsdgen
+- crates/benchbox-datagen-core/src/tpcds_update/out.rs: field formatting of dsdgen's row printers
+- crates/benchbox-datagen-core/src/tpcds_update/mod.rs: refresh-set file layout and delete files ported from dsdgen

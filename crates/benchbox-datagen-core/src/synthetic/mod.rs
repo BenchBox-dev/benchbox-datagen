@@ -155,9 +155,9 @@ pub(crate) fn write_delimited<W: Write>(
     sink: &mut W,
 ) -> io::Result<u64> {
     let schema = table.schema();
-    delimited::check(&schema, format)?;
+    delimited::check(&schema)?;
     let (mut rows, mut bytes) = (0, Vec::new());
-    if format.header && start == 0 && (end > 0 || table.rows() == 0) {
+    if format.header {
         delimited::encode_header(&schema, format, &mut bytes);
         sink.write_all(&bytes)?;
     }
@@ -186,8 +186,7 @@ mod tests {
                     let schema = generator.schema(table).expect("every table has a schema");
                     let source = generator.open(table, scale_factor, DEFAULT_SEED);
                     assert_eq!(source.schema(), schema);
-                    delimited::check(&schema, &generator.text_format(table))
-                        .expect("every column has a text encoding");
+                    delimited::check(&schema).expect("every column has a text encoding");
                     assert_eq!(source.rows(), generator.row_count(table, scale_factor));
                 }
                 let scales = generator.table_scales(scale_factor);
@@ -354,7 +353,7 @@ mod tests {
         }
 
         fn format() -> TextFormat {
-            TextFormat::tbl().with_fixed_scales(schema::fixed_scales(&COLUMNS))
+            TextFormat::tbl()
         }
 
         #[test]
@@ -405,29 +404,114 @@ mod tests {
 
         #[test]
         fn csv_tables_carry_a_header_on_the_first_part_only() {
-            let csv = TextFormat::csv(b',', true).with_fixed_scales(schema::fixed_scales(&COLUMNS));
+            let csv = TextFormat::csv(b',', true);
             let all = whole(&csv);
             assert!(
                 all.starts_with("i64,i32,dec,wide,f32,f64,fixed,flag,ts,day,embedding\n1,-1,1.50,")
             );
             assert!(all.contains(",\"[0.5,0.25,0.125]\"\n"));
             assert_eq!(all.matches("i64,").count(), 1);
-            let table: Arc<dyn Table> = Arc::new(AllTypes);
-            let mut joined = Vec::new();
-            for (part, parts) in [(1, 3), (2, 3), (3, 3)] {
-                let (start, end) = part_rows(ROWS, part, parts);
-                write_delimited(&table, &csv, start, end, &mut joined).unwrap();
+            assert!(all.contains(",1.00,"));
+            assert!(all.contains(",2.35,"));
+        }
+
+        #[derive(Debug)]
+        struct Empty;
+
+        impl Table for Empty {
+            fn schema(&self) -> SchemaRef {
+                SCHEMAS["all"].clone()
             }
-            assert_eq!(String::from_utf8(joined).unwrap(), all);
+
+            fn rows(&self) -> u64 {
+                0
+            }
+
+            fn block(&self, _index: u64) -> RecordBatch {
+                RecordBatch::new_empty(self.schema())
+            }
+        }
+
+        struct CsvGenerator;
+
+        impl Generator for CsvGenerator {
+            fn name(&self) -> &'static str {
+                "csv_fixture"
+            }
+
+            fn tables(&self) -> &'static [&'static str] {
+                &["full", "empty"]
+            }
+
+            fn schema(&self, _table: &str) -> Option<SchemaRef> {
+                Some(SCHEMAS["all"].clone())
+            }
+
+            fn row_count(&self, table: &str, _scale_factor: f64) -> u64 {
+                if table == "full" { ROWS } else { 0 }
+            }
+
+            fn open(&self, table: &str, _scale_factor: f64, _seed: u64) -> Arc<dyn Table> {
+                if table == "full" {
+                    Arc::new(AllTypes)
+                } else {
+                    Arc::new(Empty)
+                }
+            }
+
+            fn key_ranges(&self, _scale_factor: f64) -> Vec<KeyRange> {
+                Vec::new()
+            }
+
+            fn text_format(&self, _table: &str) -> TextFormat {
+                TextFormat::csv(b',', true)
+            }
+        }
+
+        fn written(
+            generator: &CsvGenerator,
+            table: &str,
+            slices: &[crate::generate::Slice],
+        ) -> String {
+            let mut out = Vec::new();
+            for slice in slices {
+                crate::generate::write_synthetic(generator, table, slice, &mut out).unwrap();
+            }
+            String::from_utf8(out).unwrap()
         }
 
         #[test]
-        fn a_part_beyond_the_first_of_an_empty_slice_has_no_header() {
-            let table: Arc<dyn Table> = Arc::new(AllTypes);
-            let csv = TextFormat::csv(b',', true);
-            let mut out = Vec::new();
-            assert_eq!(write_delimited(&table, &csv, 0, 0, &mut out).unwrap(), 0);
-            assert!(out.is_empty());
+        fn a_fixed_column_with_only_a_delimiter_override_writes_its_scale() {
+            let generator = CsvGenerator;
+            let slices = crate::generate::synthetic_plan(&generator, "full", 1.0, None, 0);
+            let text = written(&generator, "full", &slices);
+            assert!(text.contains(",1.50,"), "{text}");
+            assert!(text.contains(",2.35,"), "{text}");
+        }
+
+        #[test]
+        fn the_header_is_written_once_for_single_files_and_for_any_part_count() {
+            let generator = CsvGenerator;
+            for table in ["full", "empty"] {
+                let single = written(
+                    &generator,
+                    table,
+                    &crate::generate::synthetic_plan(&generator, table, 1.0, None, 0),
+                );
+                assert!(single.starts_with("i64,i32,dec,"));
+                assert_eq!(single.matches("i64,").count(), 1, "{table}");
+                for parts in [1, 2, 3, 8] {
+                    let joined: String = (1..=parts)
+                        .map(|part| {
+                            let slice = crate::generate::synthetic_part(
+                                &generator, table, 1.0, part, parts, 0,
+                            );
+                            written(&generator, table, &[slice])
+                        })
+                        .collect();
+                    assert_eq!(joined, single, "{table} in {parts} parts");
+                }
+            }
         }
 
         #[test]

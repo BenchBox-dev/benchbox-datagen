@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 
 use arrow::datatypes::SchemaRef;
 
-use crate::synthetic::{self, Table};
+use crate::synthetic::{self, Generator, Table};
 use crate::{BatchReader, Benchmark, Error, pipeline, schema, tpcds, tpch};
 
 #[derive(Debug, Clone)]
@@ -18,6 +18,7 @@ pub(crate) enum Slice {
     Synthetic {
         table: Arc<dyn Table>,
         rows: Range<u64>,
+        header: bool,
     },
 }
 
@@ -43,7 +44,7 @@ pub(crate) fn batches(
         (Benchmark::Tpcds, Slice::Tpcds(range)) => {
             tpcds::batches(table, scale_factor, range.clone())
         }
-        (Benchmark::Synthetic(_), Slice::Synthetic { table, rows }) => {
+        (Benchmark::Synthetic(_), Slice::Synthetic { table, rows, .. }) => {
             Box::new(synthetic::Reader::new(table.clone(), rows.start, rows.end))
         }
         _ => unreachable!("slices are built for their own benchmark"),
@@ -64,15 +65,8 @@ pub(crate) fn write_delimited<W: Write>(
         (Benchmark::Tpcds, Slice::Tpcds(range)) => {
             tpcds::write_delimited(table, scale_factor, range.clone(), sink)
         }
-        (
-            Benchmark::Synthetic(id),
-            Slice::Synthetic {
-                table: source,
-                rows,
-            },
-        ) => {
-            let format = id.generator().text_format(table);
-            synthetic::write_delimited(source, &format, rows.start, rows.end, sink)
+        (Benchmark::Synthetic(id), slice @ Slice::Synthetic { .. }) => {
+            write_synthetic(id.generator(), table, slice, sink)
         }
         _ => unreachable!("slices are built for their own benchmark"),
     }
@@ -97,26 +91,79 @@ pub(crate) fn part_slice(
         Benchmark::Tpch => Slice::Tpch { part, parts },
         Benchmark::Tpcds => Slice::Tpcds(tpcds::part_range(table, scale_factor, part, parts)),
         Benchmark::Synthetic(id) => {
-            let generator = id.generator();
-            let source = generator.open(table, scale_factor, seed);
-            let (start, end) = if generator.splittable(table) {
-                synthetic::part_rows(source.rows(), part, parts)
-            } else if part == 1 {
-                (0, source.rows())
-            } else {
-                (0, 0)
-            };
-            Slice::Synthetic {
-                table: source,
-                rows: start..end,
-            }
+            synthetic_part(id.generator(), table, scale_factor, part, parts, seed)
         }
     }
 }
 
+pub(crate) fn write_synthetic<W: Write>(
+    generator: &dyn Generator,
+    table: &str,
+    slice: &Slice,
+    sink: &mut W,
+) -> io::Result<u64> {
+    let Slice::Synthetic {
+        table: source,
+        rows,
+        header,
+    } = slice
+    else {
+        unreachable!("slices are built for their own benchmark")
+    };
+    let mut format = generator.text_format(table);
+    format.header &= *header;
+    synthetic::write_delimited(source, &format, rows.start, rows.end, sink)
+}
+
+pub(crate) fn synthetic_part(
+    generator: &dyn Generator,
+    table: &str,
+    scale_factor: f64,
+    part: i32,
+    parts: i32,
+    seed: u64,
+) -> Slice {
+    let source = generator.open(table, scale_factor, seed);
+    let (start, end) = if generator.splittable(table) {
+        synthetic::part_rows(source.rows(), part, parts)
+    } else if part == 1 {
+        (0, source.rows())
+    } else {
+        (0, 0)
+    };
+    Slice::Synthetic {
+        table: source,
+        rows: start..end,
+        header: part == 1,
+    }
+}
+
+pub(crate) fn synthetic_plan(
+    generator: &dyn Generator,
+    table: &str,
+    scale_factor: f64,
+    chunk_rows: Option<u64>,
+    seed: u64,
+) -> Vec<Slice> {
+    let source = generator.open(table, scale_factor, seed);
+    let total = source.rows();
+    let step = chunk_rows
+        .map_or(synthetic::BLOCK_ROWS, |rows| {
+            rows.max(1).div_ceil(synthetic::BLOCK_ROWS) * synthetic::BLOCK_ROWS
+        })
+        .max(1);
+    (0..total.div_ceil(step).max(1))
+        .map(|index| Slice::Synthetic {
+            table: source.clone(),
+            rows: index * step..((index + 1) * step).min(total),
+            header: index == 0,
+        })
+        .collect()
+}
+
 pub(crate) fn warm(slice: &Slice, cancel: &AtomicBool) -> Result<(), Error> {
     match slice {
-        Slice::Synthetic { table, rows } if rows.start < rows.end => {
+        Slice::Synthetic { table, rows, .. } if rows.start < rows.end => {
             if table.warm(rows.start / synthetic::BLOCK_ROWS, cancel) {
                 Ok(())
             } else {
@@ -173,19 +220,7 @@ pub(crate) fn plan(
             slices
         }
         Benchmark::Synthetic(id) => {
-            let source = id.generator().open(table, scale_factor, seed);
-            let total = source.rows();
-            let step = chunk_rows
-                .map_or(synthetic::BLOCK_ROWS, |rows| {
-                    rows.max(1).div_ceil(synthetic::BLOCK_ROWS) * synthetic::BLOCK_ROWS
-                })
-                .max(1);
-            (0..total.div_ceil(step))
-                .map(|index| Slice::Synthetic {
-                    table: source.clone(),
-                    rows: index * step..((index + 1) * step).min(total),
-                })
-                .collect()
+            synthetic_plan(id.generator(), table, scale_factor, chunk_rows, seed)
         }
     }
 }

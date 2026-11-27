@@ -5,10 +5,11 @@ use arrow::array::{
     Array, BooleanArray, Date32Array, Decimal128Array, FixedSizeListArray, Float32Array,
     Float64Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
 };
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::{DataType, Field, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
 use super::calendar::civil_from_days;
+use crate::schema::FIXED_SCALE_KEY;
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -20,7 +21,6 @@ pub(crate) struct TextFormat {
     pub(crate) header: bool,
     pub(crate) quote: bool,
     pub(crate) extension: &'static str,
-    pub(crate) fixed_scales: Vec<(&'static str, u8)>,
 }
 
 #[allow(dead_code)]
@@ -31,7 +31,6 @@ impl TextFormat {
             header: false,
             quote: false,
             extension: "tbl",
-            fixed_scales: Vec::new(),
         }
     }
 
@@ -41,13 +40,7 @@ impl TextFormat {
             header,
             quote: true,
             extension: "csv",
-            fixed_scales: Vec::new(),
         }
-    }
-
-    pub(crate) fn with_fixed_scales(mut self, scales: Vec<(&'static str, u8)>) -> Self {
-        self.fixed_scales = scales;
-        self
     }
 }
 
@@ -72,13 +65,17 @@ fn unsupported(name: &str, data_type: &DataType) -> io::Error {
     )
 }
 
-fn column<'a>(name: &str, array: &'a dyn Array, format: &TextFormat) -> io::Result<Column<'a>> {
+fn column<'a>(field: &Field, array: &'a dyn Array) -> io::Result<Column<'a>> {
+    let name = field.name();
     let data_type = array.data_type();
-    let fixed = format
-        .fixed_scales
-        .iter()
-        .find(|(column, _)| *column == name)
-        .map(|(_, scale)| usize::from(*scale));
+    let fixed = match field.metadata().get(FIXED_SCALE_KEY) {
+        None => None,
+        Some(scale) => Some(
+            scale
+                .parse::<usize>()
+                .map_err(|_| unsupported(name, data_type))?,
+        ),
+    };
     if fixed.is_some() && *data_type != DataType::Float64 {
         return Err(unsupported(name, data_type));
     }
@@ -114,20 +111,20 @@ fn column<'a>(name: &str, array: &'a dyn Array, format: &TextFormat) -> io::Resu
     column.ok_or_else(|| unsupported(name, data_type))
 }
 
-fn columns<'a>(batch: &'a RecordBatch, format: &TextFormat) -> io::Result<Vec<Column<'a>>> {
+fn columns(batch: &RecordBatch) -> io::Result<Vec<Column<'_>>> {
     batch
         .schema()
         .fields()
         .iter()
         .zip(batch.columns())
-        .map(|(field, array)| column(field.name(), array.as_ref(), format))
+        .map(|(field, array)| column(field, array.as_ref()))
         .collect()
 }
 
-pub(crate) fn check(schema: &arrow::datatypes::Schema, format: &TextFormat) -> io::Result<()> {
+pub(crate) fn check(schema: &arrow::datatypes::Schema) -> io::Result<()> {
     schema.fields().iter().try_for_each(|field| {
         let empty = arrow::array::new_empty_array(field.data_type());
-        column(field.name(), empty.as_ref(), format).map(drop)
+        column(field, empty.as_ref()).map(drop)
     })
 }
 
@@ -431,7 +428,7 @@ pub(crate) fn encode(
     format: &TextFormat,
     out: &mut Vec<u8>,
 ) -> io::Result<()> {
-    let columns = columns(batch, format)?;
+    let columns = columns(batch)?;
     out.reserve(upper_bound(&columns, batch.num_rows(), format));
     let mut digits = itoa::Buffer::new();
     let mut scratch = Scratch::new();
@@ -497,6 +494,7 @@ mod tests {
     use arrow::datatypes::{Field, Schema};
 
     use super::*;
+    use crate::schema::Kind;
 
     fn one(array: ArrayRef, nullable: bool, format: &TextFormat) -> String {
         let field = Field::new("c", array.data_type().clone(), nullable);
@@ -613,23 +611,30 @@ mod tests {
 
     #[test]
     fn fixed_scale_floats_match_python_fixed_formatting() {
-        let format = TextFormat::tbl().with_fixed_scales(vec![("c", 2)]);
         let array: ArrayRef = Arc::new(Float64Array::from(vec![
             Some(0.0),
             Some(1.005),
             Some(2.675),
+            Some(0.125),
+            Some(0.375),
             Some(-0.001),
             Some(12.5),
             Some(1e7),
             None,
             Some(f64::NAN),
         ]));
+        let field = Kind::Fixed(2).field("c", true);
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![array]).unwrap();
+        let mut out = Vec::new();
+        encode(&batch, &TextFormat::tbl(), &mut out).unwrap();
         assert_eq!(
-            one(array, true, &format).lines().collect::<Vec<_>>(),
+            String::from_utf8(out).unwrap().lines().collect::<Vec<_>>(),
             [
                 "0.00",
                 "1.00",
                 "2.67",
+                "0.12",
+                "0.38",
                 "-0.00",
                 "12.50",
                 "10000000.00",
@@ -641,12 +646,13 @@ mod tests {
 
     #[test]
     fn fixed_scale_on_a_non_float64_column_is_an_error() {
-        let format = TextFormat::tbl().with_fixed_scales(vec![("c", 2)]);
         let array: ArrayRef = Arc::new(Int64Array::from(vec![1]));
-        let field = Field::new("c", DataType::Int64, false);
+        let field = Field::new("c", DataType::Int64, false).with_metadata(
+            std::collections::HashMap::from([(FIXED_SCALE_KEY.to_owned(), "2".to_owned())]),
+        );
         let batch = RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![array]).unwrap();
-        assert!(encode(&batch, &format, &mut Vec::new()).is_err());
-        assert!(check(batch.schema().as_ref(), &format).is_err());
+        assert!(encode(&batch, &TextFormat::tbl(), &mut Vec::new()).is_err());
+        assert!(check(batch.schema().as_ref()).is_err());
     }
 
     #[test]
@@ -775,7 +781,7 @@ mod tests {
         let batch = RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![array]).unwrap();
         let error = encode(&batch, &TextFormat::tbl(), &mut Vec::new()).unwrap_err();
         assert!(error.to_string().contains("UInt8"));
-        assert!(check(batch.schema().as_ref(), &TextFormat::tbl()).is_err());
+        assert!(check(batch.schema().as_ref()).is_err());
     }
 
     #[test]

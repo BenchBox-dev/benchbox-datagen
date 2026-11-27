@@ -7,6 +7,73 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "THIRD_PARTY_LICENSES"
 
 
+TPC_DERIVED = [
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/columns.rs",
+        "generated from tools/column_list.txt of the TPC-DS 4.0.0 kit (the column list mkheader turns into dsdgen's columns.h)",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/dims.rs",
+        "the scaling.dst row-count weights (row_spec, source_table_rows), the zip-to-GMT offset table (GMT_OFFSETS) and dimension source-table generators ported from dsdgen",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/scd.rs",
+        "slowly-changing dimension source-table generators ported from dsdgen",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/orders.rs",
+        "purchase, catalog order and web order source-table generators ported from dsdgen",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/plan.rs",
+        "update-date selection and per-day row scaling ported from dsdgen",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/calendar.rs",
+        "calendar and date routines ported from dsdgen, reading calendar.dst",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/ctx.rs",
+        "join-key and catalog-page routines ported from dsdgen",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/rng.rs",
+        "random-stream seeding by column number ported from dsdgen",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/out.rs",
+        "field formatting of dsdgen's row printers",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/tpcds_update/mod.rs",
+        "refresh-set file layout and delete files ported from dsdgen",
+    ),
+]
+
+
+def tpc_derived_notice() -> str:
+    directory = ROOT / "crates" / "benchbox-datagen-core" / "src" / "tpcds_update"
+    listed = {ROOT / path for path, _ in TPC_DERIVED}
+    unlisted = sorted(str(path.relative_to(ROOT)) for path in directory.glob("*.rs") if path not in listed)
+    if unlisted:
+        raise SystemExit(f"tpcds_update files missing from TPC_DERIVED in tools/third_party_licenses.py: {unlisted}")
+    readme = (ROOT / "README.md").read_text()
+    for path, _ in TPC_DERIVED:
+        if not (ROOT / path).is_file():
+            raise SystemExit(f"TPC_DERIVED lists a missing file: {path}")
+        if f"`{path}`" not in readme:
+            raise SystemExit(f"README.md does not list the TPC-derived file {path}")
+    entries = "\n".join(f"- {path}: {what}" for path, what in TPC_DERIVED)
+    return (
+        "================================================================================\n"
+        "TPC-DERIVED FILES in benchbox-datagen (TPC-DS 4.0.0 kit)\n\n"
+        "The following files are derived from the TPC-DS 4.0.0 kit (dsdgen, its distribution\n"
+        "files and column list), a Work covered by the TPC legal notice above. The notice\n"
+        "applies to them:\n\n"
+        f"{entries}\n"
+    )
+
+
 def tpc_notice(packages: dict, seen: set[str]) -> str:
     package = next(packages[pid] for pid in seen if packages[pid]["name"] == "tpcdsgen")
     source = Path(package["manifest_path"]).parent / "data" / "calendar.dst"
@@ -61,6 +128,7 @@ def render() -> str:
                 f"NOTICE from {package['name']} {package['version']}\n\n{notice.read_text().strip()}\n"
             )
     notices.append(tpc_notice(packages, seen))
+    notices.append(tpc_derived_notice())
     return licences.rstrip() + "\n\n" + "\n".join(notices)
 
 
