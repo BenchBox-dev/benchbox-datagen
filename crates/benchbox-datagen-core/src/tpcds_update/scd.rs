@@ -13,17 +13,17 @@ use tpcdsgen::types::Decimal;
 
 use super::calendar::{DATA_END_DATE, DATA_START_DATE, TODAYS_DATE};
 use super::columns::*;
-use super::ctx::Ctx;
+use super::ctx::{Ctx, element, internal, remainder};
 use super::out::Out;
 use crate::{Error, FileStats};
 
-fn concurrent_web_sites(scale: f64) -> i64 {
+fn concurrent_web_sites(scale: f64) -> Result<i64, Error> {
     if scale < 1.0 {
-        return ((2.0 * scale) as i64).max(1);
+        return Ok(((2.0 * scale) as i64).max(1));
     }
     PseudoTableScalingInfos::get_concurrent_web_sites()
         .get_row_count_for_scale(scale)
-        .expect("concurrent web sites is defined for every scale")
+        .map_err(|e| internal(&format!("concurrent web sites at scale {scale}: {e}")))
 }
 
 const CALL_CENTER_TABLE: i64 = 0;
@@ -132,14 +132,14 @@ impl Order {
         }
     }
 
-    fn surrogate_key(&self, ctx: &mut Ctx, index: i64, column: Col) -> i64 {
-        let id = i64::from(self.ids[(index - 1) as usize]) + 1;
+    fn surrogate_key(&self, ctx: &mut Ctx, index: i64, column: Col) -> Result<i64, Error> {
+        let id = i64::from(element(&self.ids, index - 1, "source row permutation")?) + 1;
         let block = id / 3;
-        match id % 3 {
+        Ok(match id % 3 {
             1 => block * 6 + 1,
             2 => block * 6 + i64::from(ctx.rng.int(column, 2, 3)),
             _ => (block - 1) * 6 + i64::from(ctx.rng.int(column, 4, 6)),
-        }
+        })
     }
 }
 
@@ -189,10 +189,19 @@ fn write_call_center(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
         let scale = ctx.scale.ceil() as i32;
         CC_EMPLOYEE_MAX.wrapping_mul(scale).wrapping_mul(scale)
     };
+    if employee_limit < 1 {
+        return Err(internal(&format!(
+            "call center employee limit {employee_limit} is not positive at scale {}",
+            ctx.scale
+        )));
+    }
     let centers = CallCenterDistributions::get_number_of_call_centers() as i64;
+    if centers < 1 {
+        return Err(internal("call center distribution is empty"));
+    }
     for index in 1..=rows {
         let order = order.get_or_insert_with(|| Order::new(ctx, "call_center", S_CALL_CENTER_ID));
-        let sk = order.surrogate_key(ctx, index, S_CALL_CENTER_ID);
+        let sk = order.surrogate_key(ctx, index, S_CALL_CENTER_ID)?;
         let nulls = Nulls::draw(ctx, CC_NULLS, TABLE_CALL_CENTER, 100, DEFAULT_NOT_NULL);
         let key = revision(CALL_CENTER_TABLE, sk);
         if key.first {
@@ -276,7 +285,7 @@ fn write_item(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let mut old = ItemOld::default();
     for index in 1..=rows {
         let order = order.get_or_insert_with(|| Order::new(ctx, "item", S_ITEM_PERMUTE));
-        let sk = order.surrogate_key(ctx, index, S_ITEM_ID);
+        let sk = order.surrogate_key(ctx, index, S_ITEM_ID)?;
         let key = revision(ITEM_TABLE, sk);
 
         let (low, high) =
@@ -364,7 +373,7 @@ fn write_store(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let mut old = StoreOld::default();
     for index in 1..=rows {
         let order = order.get_or_insert_with(|| Order::new(ctx, "store", S_STORE_ID));
-        let sk = order.surrogate_key(ctx, index, S_STORE_ID);
+        let sk = order.surrogate_key(ctx, index, S_STORE_ID)?;
         let nulls = Nulls::draw(ctx, W_STORE_NULLS, TABLE_STORE, 100, DEFAULT_NOT_NULL);
         let key = revision(STORE_SOURCE_TABLE, sk);
         let mut flags = Flags {
@@ -456,8 +465,12 @@ struct WebPageOld {
     char_count: i32,
 }
 
-fn web_site_duration(scale: f64) -> i64 {
-    (WEB_MAX_DATE - i64::from(DATA_START_DATE)) * concurrent_web_sites(scale)
+fn web_site_duration(scale: f64) -> Result<i64, Error> {
+    let duration = (WEB_MAX_DATE - i64::from(DATA_START_DATE)) * concurrent_web_sites(scale)?;
+    if duration < 1 {
+        return Err(internal("web site duration is not positive"));
+    }
+    Ok(duration)
 }
 
 fn write_web_page(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
@@ -465,10 +478,10 @@ fn write_web_page(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let rows = super::dims::source_table_rows("s_web_page", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = WebPageOld::default();
-    let duration = web_site_duration(ctx.scale);
+    let duration = web_site_duration(ctx.scale)?;
     for index in 1..=rows {
         let order = order.get_or_insert_with(|| Order::new(ctx, "web_page", S_WPAG_PERMUTE));
-        let sk = order.surrogate_key(ctx, index, S_WPAG_ID);
+        let sk = order.surrogate_key(ctx, index, S_WPAG_ID)?;
         let nulls = Nulls::draw(ctx, WP_NULLS, TABLE_WEB_PAGE, 250, DEFAULT_NOT_NULL);
         let key = revision(WEB_PAGE_TABLE, sk);
         let mut flags = Flags {
@@ -477,7 +490,8 @@ fn write_web_page(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
         };
         ctx.rng.int(WP_CREATION_DATE_SK, 1998, 2002);
         let site = sk / WEB_PAGES_PER_SITE + 1;
-        let earliest = i64::from(DATA_START_DATE) - (site * WEB_DATE_STAGGER) % duration / 2;
+        let earliest = i64::from(DATA_START_DATE)
+            - remainder(site * WEB_DATE_STAGGER, duration, "web page open date")? / 2;
         let mut creation_date = i64::from(ctx.rng.int(
             WP_CREATION_DATE_SK,
             earliest as i32,
@@ -557,7 +571,7 @@ fn write_web_site(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
     let mut out = Out::create(ctx.run, dir, "s_web_site", ctx.plan.update)?;
     let rows = super::dims::source_table_rows("s_web_site", ctx.scale);
     let mut old = WebSiteOld::default();
-    let duration = web_site_duration(ctx.scale);
+    let duration = web_site_duration(ctx.scale)?;
     let mut open_date = 0;
     let mut close_date = 0;
     let mut name = String::new();
@@ -566,7 +580,8 @@ fn write_web_site(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
         let nulls = Nulls::draw(ctx, WEB_NULLS, TABLE_WEB_SITE, 100, DEFAULT_NOT_NULL);
         let key = revision(WEB_SITE_TABLE, sk);
         if key.first {
-            let opened = i64::from(DATA_START_DATE) - (sk * WEB_DATE_STAGGER) % duration / 2;
+            let opened = i64::from(DATA_START_DATE)
+                - remainder(sk * WEB_DATE_STAGGER, duration, "web site open date")? / 2;
             let mut closed = opened - duration;
             if sk % 2 == 0 && (sk / 2) % 2 == 0 {
                 closed += duration / 2;

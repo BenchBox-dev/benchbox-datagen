@@ -8,7 +8,7 @@ use tpcdsgen::types::pricing::{
 
 use super::calendar::TODAYS_DATE;
 use super::columns::*;
-use super::ctx::Ctx;
+use super::ctx::{Ctx, element};
 use super::out::Out;
 use super::plan::Channel;
 use crate::{Error, FileStats};
@@ -42,12 +42,17 @@ impl Items {
         }
     }
 
-    fn next(&mut self) -> i64 {
+    fn next(&mut self) -> Result<i64, Error> {
         self.index += 1;
         if self.index > self.count {
             self.index = 1;
         }
-        first_sk(i64::from(self.permutation[(self.index - 1) as usize]) + 1)
+        let id = element(
+            &self.permutation,
+            i64::from(self.index) - 1,
+            "item permutation",
+        )?;
+        Ok(first_sk(i64::from(id) + 1))
     }
 }
 
@@ -96,7 +101,7 @@ pub(super) fn write_purchases(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats
         for number in 1..=12 {
             let items = items.get_or_insert_with(|| Items::new(ctx, S_PLINE_PERMUTE));
             items.index = cursor;
-            let item = items.next();
+            let item = items.next()?;
             cursor = items.index;
             let promotion = ctx.join_uniform(S_PLINE_PROMOTION_ID, "promotion");
             ctx.rng.int(S_PLINE_QUANTITY, 1, 100);
@@ -197,7 +202,7 @@ pub(super) fn write_catalog_orders(ctx: &mut Ctx, dir: &Path) -> Result<Vec<File
         for number in 1..=9 {
             let items = items.get_or_insert_with(|| Items::new(ctx, S_CLIN_PERMUTE));
             items.index = cursor;
-            let item = items.next();
+            let item = items.next()?;
             cursor = items.index;
             let promotion = ctx.join_uniform(S_CLIN_PROMOTION_ID, "promotion");
             let warehouse = ctx.join_uniform(S_CLIN_WAREHOUSE_ID, "warehouse");
@@ -206,8 +211,8 @@ pub(super) fn write_catalog_orders(ctx: &mut Ctx, dir: &Path) -> Result<Vec<File
             if ship_date > TODAYS_DATE {
                 ship_date = -1;
             }
-            let page = ctx.join_catalog_page(S_CLIN_CATALOG_PAGE_ID, order.date);
-            let catalog = ctx.catalog_number(page);
+            let page = ctx.join_catalog_page(S_CLIN_CATALOG_PAGE_ID, order.date)?;
+            let catalog = ctx.catalog_number(page)?;
             let price = pricing(ctx, S_CLIN_PRICING);
             let line = Line {
                 item,
@@ -308,7 +313,7 @@ pub(super) fn write_web_orders(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStat
         for number in 1..=12 {
             let items = items.get_or_insert_with(|| Items::new(ctx, S_WLIN_PERMUTE));
             items.index = cursor;
-            let item = items.next();
+            let item = items.next()?;
             cursor = items.index;
             let promotion = ctx.join_uniform(S_WLIN_PROMOTION_ID, "promotion");
             let warehouse = ctx.join_uniform(S_WLIN_WAREHOUSE_ID, "warehouse");

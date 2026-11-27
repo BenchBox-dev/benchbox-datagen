@@ -26,7 +26,7 @@ pub(super) struct Out<'a> {
     run: &'a Run<'a>,
     table: &'static str,
     path: PathBuf,
-    writer: BufWriter<File>,
+    writer: Option<BufWriter<File>>,
     line: String,
     fields: usize,
     rows: u64,
@@ -42,13 +42,11 @@ impl<'a> Out<'a> {
     ) -> Result<Self, Error> {
         run.check()?;
         let path = dir.join(format!("{name}_{update}.dat"));
-        run.record(&path);
-        let file = File::create(&path).map_err(|e| io_error(&path, e))?;
         Ok(Self {
             run,
             table: name,
             path,
-            writer: BufWriter::with_capacity(1 << 20, file),
+            writer: None,
             line: String::with_capacity(512),
             fields: 0,
             rows: 0,
@@ -129,7 +127,17 @@ impl<'a> Out<'a> {
     pub(super) fn end(&mut self) -> Result<(), Error> {
         self.run.check()?;
         self.line.push('\n');
-        self.writer
+        let writer = match &mut self.writer {
+            Some(writer) => writer,
+            empty => {
+                let file = self
+                    .run
+                    .create_file(&self.path)
+                    .map_err(|e| io_error(&self.path, e))?;
+                empty.insert(BufWriter::with_capacity(1 << 20, file))
+            }
+        };
+        writer
             .write_all(self.line.as_bytes())
             .map_err(|e| io_error(&self.path, e))?;
         self.bytes += self.line.len() as u64;
@@ -140,7 +148,9 @@ impl<'a> Out<'a> {
     }
 
     pub(super) fn finish(mut self) -> Result<FileStats, Error> {
-        self.writer.flush().map_err(|e| io_error(&self.path, e))?;
+        if let Some(writer) = &mut self.writer {
+            writer.flush().map_err(|e| io_error(&self.path, e))?;
+        }
         Ok(FileStats {
             table: self.table,
             path: self.path,

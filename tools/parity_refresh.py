@@ -36,11 +36,13 @@ def main() -> int:
             actual = sha256(Path(stat.path))
             report[name] = {"sha256": actual, "rows": stat.rows, "match": expected == actual}
             ok &= expected == actual
+        extra = sorted(p.name for p in oracle.glob("*.dat") if p.name not in report)
+        ok &= not extra
         if args.golden_out:
             Path(args.golden_out).write_text(
                 json.dumps({name: entry["sha256"] for name, entry in report.items()}, indent=1) + "\n"
             )
-        print(json.dumps({"scale": args.scale, "sets": args.sets, "files": len(report), "ok": ok, "mismatches": [n for n, e in report.items() if not e["match"]]}, indent=1))
+        print(json.dumps({"scale": args.scale, "sets": args.sets, "files": len(report), "ok": ok, "mismatches": [n for n, e in report.items() if not e["match"]], "oracle_only": extra}, indent=1))
         return 0 if ok else 1
     finally:
         shutil.rmtree(out, ignore_errors=True)

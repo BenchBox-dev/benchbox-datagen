@@ -8,7 +8,7 @@ mod plan;
 mod rng;
 mod scd;
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -18,6 +18,24 @@ use calendar::date_string;
 use ctx::{Ctx, Run};
 
 pub(crate) use rng::DEFAULT_SEED;
+
+const REFRESH_SCALE_GRID: [u32; 9] = [1, 10, 100, 300, 1000, 3000, 10_000, 30_000, 100_000];
+
+pub(crate) fn validate_refresh_scale(scale_factor: f64) -> Result<(), Error> {
+    let on_grid = scale_factor < 1.0
+        || REFRESH_SCALE_GRID
+            .iter()
+            .any(|&grid| f64::from(grid) == scale_factor);
+    if on_grid {
+        return Ok(());
+    }
+    let accepted = REFRESH_SCALE_GRID.map(|grid| grid.to_string()).join(", ");
+    Err(Error::RefreshUnsupported(format!(
+        "tpcds refresh sets at scale factor {scale_factor} are not supported: dsdgen -update \
+         aborts for scale factors of 1 or more that are not on the scale grid; accepted scale \
+         factors are below 1 or one of {accepted}"
+    )))
+}
 
 fn write_delete_file(run: &Run, path: &Path, dates: &[i32; 6]) -> Result<FileStats, Error> {
     run.check()?;
@@ -30,8 +48,7 @@ fn write_delete_file(run: &Run, path: &Path, dates: &[i32; 6]) -> Result<FileSta
         ));
     }
     let io = |e: std::io::Error| Error::Write(format!("{}: {e}", path.display()));
-    run.record(path);
-    let mut file = File::create(path).map_err(io)?;
+    let mut file = run.create_file(path).map_err(io)?;
     file.write_all(text.as_bytes()).map_err(io)?;
     Ok(FileStats {
         table: "delete",
@@ -68,7 +85,7 @@ fn write_set(
     seed: i32,
     dir: &Path,
 ) -> Result<Vec<FileStats>, Error> {
-    let mut ctx = Ctx::new(run, scale_factor, update, seed);
+    let mut ctx = Ctx::new(run, scale_factor, update, seed)?;
     let mut stats = vec![
         write_delete_file(
             ctx.run,
@@ -88,6 +105,7 @@ fn write_set(
     stats.extend(orders::write_purchases(&mut ctx, dir)?);
     stats.extend(orders::write_web_orders(&mut ctx, dir)?);
     stats.extend(dims::write_zip_to_gmt(&mut ctx, dir)?);
+    stats.retain(|file| file.rows > 0);
     Ok(stats)
 }
 
@@ -230,5 +248,78 @@ mod tests {
         assert!(matches!(out.end(), Err(Error::Cancelled)));
         run.remove_created();
         assert!(entries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn scale_factors_off_the_dsdgen_grid_are_rejected_before_any_file_is_written() {
+        for scale in [2.0, 3.0, 11.0, 13.0, 301.0, 65_536.0, 100_001.0] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("out");
+            let result = crate::write_refresh_sets(
+                crate::Benchmark::Tpcds,
+                scale,
+                1,
+                None,
+                &dir,
+                &AtomicBool::new(false),
+            );
+            match result {
+                Err(Error::RefreshUnsupported(message)) => {
+                    assert!(message.contains("1, 10, 100, 300"), "{message}");
+                }
+                other => panic!("scale {scale}: {other:?}"),
+            }
+            assert!(!dir.exists(), "scale {scale} created the output directory");
+        }
+    }
+
+    #[test]
+    fn grid_scale_factors_and_scale_factors_below_one_are_accepted() {
+        for scale in [0.0001, 0.5, 0.99, 1.0, 10.0, 100.0, 300.0, 100_000.0] {
+            assert!(validate_refresh_scale(scale).is_ok(), "{scale}");
+        }
+    }
+
+    #[test]
+    fn a_failed_run_does_not_delete_a_file_it_did_not_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("s_purchase_1.dat");
+        fs::write(&existing, "keep\n").unwrap();
+        let cancel = AtomicBool::new(false);
+        let run = Run::new(&cancel);
+        let mut owned = out::Out::create(&run, dir.path(), "s_customer", 1).unwrap();
+        owned.int(1).end().unwrap();
+        let mut shared = out::Out::create(&run, dir.path(), "s_purchase", 1).unwrap();
+        shared.int(1).end().unwrap();
+        run.remove_created();
+        assert!(existing.exists());
+        assert!(!dir.path().join("s_customer_1.dat").exists());
+    }
+
+    #[test]
+    fn tables_without_rows_write_no_file_like_dsdgen() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats =
+            write_tpcds_refresh(0.0001, 1, DEFAULT_SEED, dir.path(), &AtomicBool::new(false))
+                .unwrap();
+        let mut written = entries(dir.path());
+        written.sort();
+        let mut reported: Vec<String> = stats
+            .iter()
+            .map(|s| s.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        reported.sort();
+        assert_eq!(written, reported);
+        assert_eq!(written.len(), 13);
+        assert!(!written.contains(&"s_purchase_1.dat".to_owned()));
+    }
+
+    #[test]
+    fn checked_helpers_return_errors_instead_of_panicking() {
+        assert!(ctx::quotient(1, 0, "x").is_err());
+        assert!(ctx::remainder(1, 0, "x").is_err());
+        assert!(ctx::element(&[1, 2], -1, "x").is_err());
+        assert!(ctx::element(&[1, 2], 2, "x").is_err());
+        assert_eq!(ctx::element(&[1, 2], 1, "x").unwrap(), 2);
     }
 }

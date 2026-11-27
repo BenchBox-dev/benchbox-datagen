@@ -3,7 +3,9 @@ use super::calendar::{
     day_of_week, is_leap, jtodt,
 };
 use super::columns::Col;
+use super::ctx::quotient;
 use super::rng::Rng;
+use crate::Error;
 use crate::tpcds::{id_count, source_rows};
 
 const ZONES: [usize; 3] = [CALENDAR_LOW, CALENDAR_MEDIUM, CALENDAR_HIGH];
@@ -54,7 +56,7 @@ impl DayRows {
 }
 
 impl Plan {
-    pub(super) fn new(scale: f64, update: i32, rng: &mut Rng) -> Self {
+    pub(super) fn new(scale: f64, update: i32, rng: &mut Rng) -> Result<Self, Error> {
         let (update_dates, inventory_dates) = set_update_dates(rng, update);
         let mut plan = Self {
             scale,
@@ -66,21 +68,21 @@ impl Plan {
             web: DayRows::default(),
             inventory: DayRows::default(),
         };
-        plan.store = plan.day_rows(Channel::Store);
-        plan.catalog = plan.day_rows(Channel::Catalog);
-        plan.web = plan.day_rows(Channel::Web);
-        plan.inventory = plan.day_rows(Channel::Inventory);
-        plan
+        plan.store = plan.day_rows(Channel::Store)?;
+        plan.catalog = plan.day_rows(Channel::Catalog)?;
+        plan.web = plan.day_rows(Channel::Web)?;
+        plan.inventory = plan.day_rows(Channel::Inventory)?;
+        Ok(plan)
     }
 
-    fn day_rows(&self, channel: Channel) -> DayRows {
+    fn day_rows(&self, channel: Channel) -> Result<DayRows, Error> {
         let mut rows = DayRows::default();
         let mut total = 0;
         for (slot, date) in self.update_dates.iter().enumerate() {
-            total += date_scaling(self.scale, channel, *date);
+            total += date_scaling(self.scale, channel, *date)?;
             rows.cumulative[slot] = total;
         }
-        rows
+        Ok(rows)
     }
 
     pub(super) fn rows(&self, channel: Channel) -> i64 {
@@ -104,14 +106,14 @@ impl Plan {
     }
 }
 
-pub(super) fn date_scaling(scale: f64, channel: Channel, julian: i32) -> i64 {
+pub(super) fn date_scaling(scale: f64, channel: Channel, julian: i32) -> Result<i64, Error> {
     let (year, _, _) = jtodt(julian);
     let (mut rows, mut weight_set) = match channel {
         Channel::Store => (source_rows("store_sales", scale) as i64, CALENDAR_SALES),
         Channel::Catalog => (source_rows("catalog_sales", scale) as i64, CALENDAR_SALES),
         Channel::Web => (source_rows("web_sales", scale) as i64, CALENDAR_SALES),
         Channel::Inventory => {
-            return (source_rows("warehouse", scale) * id_count("item", scale)) as i64;
+            return Ok((source_rows("warehouse", scale) * id_count("item", scale)) as i64);
         }
     };
     if is_leap(year) {
@@ -122,7 +124,7 @@ pub(super) fn date_scaling(scale: f64, channel: Channel, julian: i32) -> i64 {
     let day_weight = i64::from(calendar.weight(day_number(julian), weight_set));
     rows *= day_weight;
     rows += calendar_total / 2;
-    rows / calendar_total
+    quotient(rows, calendar_total, "calendar scaling")
 }
 
 fn weight_flag(julian: i32, offset: i32, set: usize) -> bool {

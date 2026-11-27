@@ -35,10 +35,17 @@ def _tpcds_golden(scale):
     return json.loads((DATA / "tpcds_refresh_sha256.json").read_text())[scale]
 
 
+def _check_against(golden, stats):
+    assert {Path(s.path).name for s in stats} == set(golden)
+    for stat in stats:
+        path = Path(stat.path)
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == golden[path.name], path.name
+
+
 def test_tpcds_refresh_sets_match_the_committed_dsdgen_hashes_at_scale_factor_one(tmp_path):
     golden = _tpcds_golden("1")
-    stats = benchbox_datagen.write_refresh("tpcds", 1.0, tmp_path, sets=2)
-    assert len(stats) == len(golden) == 46
+    stats = benchbox_datagen.write_refresh("tpcds", 1.0, tmp_path, sets=7)
+    assert len(stats) == len(golden) == 161
     for stat in stats:
         path = Path(stat.path)
         assert hashlib.sha256(path.read_bytes()).hexdigest() == golden[path.name], path.name
@@ -66,6 +73,42 @@ def test_tpcds_refresh_set_matches_the_committed_dsdgen_hashes_at_scale_factor_1
     for stat in stats:
         path = Path(stat.path)
         assert hashlib.sha256(path.read_bytes()).hexdigest() == golden[path.name], path.name
+
+
+def test_tpcds_refresh_set_127_matches_the_committed_dsdgen_hashes(tmp_path):
+    golden = _tpcds_golden("0.01_set127")
+    stats = benchbox_datagen.write_refresh("tpcds", 0.01, tmp_path, sets=127)
+    _check_against(golden, [s for s in stats if Path(s.path).name.endswith("_127.dat")])
+
+
+def test_tpcds_refresh_with_a_non_default_rng_seed_matches_the_committed_dsdgen_hashes(tmp_path):
+    stats = benchbox_datagen.write_refresh("tpcds", 1.0, tmp_path, sets=2, rng_seed=20260709)
+    _check_against(_tpcds_golden("1_rng_seed_20260709"), stats)
+
+
+def test_tpcds_refresh_writes_no_file_for_tables_without_rows_like_dsdgen(tmp_path):
+    stats = benchbox_datagen.write_refresh("tpcds", 0.0001, tmp_path)
+    _check_against(_tpcds_golden("0.0001"), stats)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(_tpcds_golden("0.0001"))
+
+
+@pytest.mark.parametrize("scale", [2.0, 3.0, 13.0, 301.0, 65536.0, 100001.0])
+def test_tpcds_refresh_rejects_scale_factors_off_the_dsdgen_grid_and_writes_nothing(tmp_path, scale):
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="1, 10, 100, 300, 1000, 3000, 10000, 30000, 100000"):
+        benchbox_datagen.write_refresh("tpcds", scale, out)
+    assert not out.exists()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("BENCHBOX_DATAGEN_HEAVY"),
+    reason="set BENCHBOX_DATAGEN_HEAVY=1 and run under make heavy-run",
+)
+def test_tpcds_refresh_set_matches_the_committed_dsdgen_hashes_at_scale_factor_10(tmp_path):
+    golden = _tpcds_golden("10")
+    stats = benchbox_datagen.write_refresh("tpcds", 10.0, tmp_path)
+    assert len(golden) == 23
+    _check_against(golden, stats)
 
 
 def test_tpcds_refresh_files_follow_the_dsdgen_layout(tmp_path):

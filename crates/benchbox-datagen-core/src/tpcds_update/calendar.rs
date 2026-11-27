@@ -132,7 +132,7 @@ pub(super) fn day_of_week(julian: i32) -> i32 {
         known[2] = 1;
     }
     let doomsday = [3, 2, 0, 5];
-    let mut anchor = (year / 100 - 15) % 4;
+    let mut anchor = (year / 100 - 15).rem_euclid(4);
     anchor = doomsday[anchor as usize];
     let q = year % 100;
     let r = q % 12;

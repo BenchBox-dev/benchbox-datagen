@@ -16,7 +16,7 @@ use tpcdsgen::types::{Address, Decimal};
 
 use super::calendar::{DATA_START_DATE, TODAYS_DATE, dttoj};
 use super::columns::*;
-use super::ctx::Ctx;
+use super::ctx::{Ctx, element, internal, quotient, remainder};
 use super::out::Out;
 use super::plan::Channel;
 use crate::{Error, FileStats};
@@ -100,14 +100,13 @@ fn vehicle_count() -> &'static IntValuesDistribution {
     })
 }
 
-fn address_scaling(scale: f64) -> tpcdsgen::config::Scaling {
-    SessionBuilder::new()
+fn address_scaling(scale: f64) -> Result<tpcdsgen::config::Scaling, Error> {
+    let session = SessionBuilder::new()
         .with_scale_factor(scale.max(1.0))
         .with_compat_mode(CompatMode::C)
         .build()
-        .expect("scale factor is positive")
-        .get_scaling()
-        .clone()
+        .map_err(|e| internal(&format!("scaling at scale {scale}: {e}")))?;
+    Ok(session.get_scaling().clone())
 }
 
 fn make_address(ctx: &mut Ctx, scaling: &tpcdsgen::config::Scaling) -> Address {
@@ -121,7 +120,7 @@ fn make_address(ctx: &mut Ctx, scaling: &tpcdsgen::config::Scaling) -> Address {
 pub(super) fn write_dimensions(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats>, Error> {
     let update = ctx.plan.update;
     let mut stats = Vec::new();
-    let scaling = address_scaling(ctx.scale);
+    let scaling = address_scaling(ctx.scale)?;
     stats.push(write_customer_address(ctx, dir, update, &scaling)?);
     stats.push(write_catalog_page(ctx, dir, update)?);
     stats.push(write_customer(ctx, dir, update, &scaling)?);
@@ -160,7 +159,7 @@ fn write_customer_address(
 fn write_catalog_page(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, Error> {
     const CATALOGS_PER_YEAR: i64 = 18;
     let mut out = Out::create(ctx.run, dir, "s_catalog_page", update)?;
-    let per_catalog = ctx.pages_per_catalog();
+    let per_catalog = ctx.pages_per_catalog()?;
     for index in 1..=source_table_rows("s_catalog_page", ctx.scale) {
         ctx.rng.next(CP_NULLS);
         let catalog = (index - 1) / per_catalog + 1;
@@ -210,7 +209,7 @@ fn write_customer(
     let min_income = Decimal::new(0, 2);
     let max_income = Decimal::new(20_000_000, 2);
     for index in 1..=source_table_rows("s_customer", ctx.scale) {
-        let id = i64::from(permutation[(index - 1) as usize]) + 1;
+        let id = i64::from(element(&permutation, index - 1, "customer permutation")?) + 1;
         let mut demographic = ctx.rng.key(S_CUST_GENDER, 1, demographics) - 1;
         let size = DemographicsDistributions::get_gender_size() as i64;
         let gender = DemographicsDistributions::get_gender_for_index_mod_size(demographic);
@@ -480,9 +479,9 @@ pub(super) fn write_inventory(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats
     let warehouses = ctx.rows("warehouse");
     for index in 1..=ctx.plan.rows(Channel::Inventory) {
         let mut n = index - 1;
-        let item = n % items + 1;
-        n /= items;
-        let warehouse = n % warehouses + 1;
+        let item = remainder(n, items, "inventory item")? + 1;
+        n = quotient(n, items, "inventory item")?;
+        let warehouse = remainder(n, warehouses, "inventory warehouse")? + 1;
         let date = ctx.plan.update_date(Channel::Inventory, index);
         let quantity = ctx.rng.int(S_INVN_QUANTITY, 0, 250);
         out.id(warehouse)
