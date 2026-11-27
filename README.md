@@ -12,7 +12,7 @@ The design and its validation gates are recorded in BenchBox's
 The library is built in stages:
 
 1. TPC-H
-2. TPC-DS, including fractional scales and refresh sets
+2. TPC-DS, including fractional scales (refresh sets follow separately)
 3. SSB
 4. The BenchBox synthetic generators (`h2odb`, `tsbs_devops`, `clickbench`,
    `tpch_skew`, `vector_search`, `coffeeshop`, `joinorder_synthetic`,
@@ -20,14 +20,21 @@ The library is built in stages:
 
 TPC generation depends on the upstream Apache-2.0 crates from
 [`datafusion-contrib/tpcgen-rs`](https://github.com/datafusion-contrib/tpcgen-rs),
-pinned by exact version. This project does not fork them: fixes go upstream.
+pinned by exact version. This project does not fork them: fixes go upstream, and any
+patch carried until upstream releases it is listed under
+[Carried upstream patches](#carried-upstream-patches).
 
-Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factor 1 or above, in `CompatMode::C`, byte-identical to the bundled `dsdgen`) and SSB (all five tables, any scale factor) as
+Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) and SSB (all five tables, any scale factor) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
 `NOT NULL` columns non-nullable). Delimited output is byte-identical to the
 bundled `dbgen` / `dsdgen -TERMINATE n` output (no trailing `|`), for every table.
-TPC-DS below scale factor 1 is refused until fractional scales are implemented.
+Below TPC-DS scale factor 1 the patched `dsdgen` scale model (`max(1, floor(SF 1 rows x SF))`,
+six static tables) supplies every table's row counts to `tpcdsgen` through a caller-supplied
+`Scaling`, so all 24 tables come from `tpcdsgen` at every scale factor.
+TPC-H refresh sets (`dbgen -U`) are available through `write_refresh`, byte-identical to the
+bundled generator; TPC-DS and SSB have no refresh sets and `write_refresh("tpcds", ...)` and
+`write_refresh("ssb", ...)` raise an error.
 Parquet output is written in Rust with 122,880-row row groups and the
 `benchbox.parquet_writer=benchbox-datagen-<major>` key-value entry; neither
 format's bytes depend on the thread count. SSB output is described under
@@ -161,14 +168,17 @@ foreign-key and uniqueness checks and the 13-query DuckDB/DataFusion agreement
 that gate the frozen goldens in `crates/benchbox-datagen-core/tests/ssb.rs`.
 
 Acceptance rules: a distribution metric passes inside the min-max of 5 legacy
-seeds, inside their 99.9% prediction interval, or (boundary quantiles of
+seeds (42-46), inside their 99.9% prediction interval, or (boundary quantiles of
 low-cardinality columns) by rank. For the date-valued `lo_orderdate` and
-`lo_commitdate` the legacy statistics drop rows dated 1998-12-31, the one day
-the two calendars do not share, and the same rule applies. `date` columns are
-compared by a digest of the shared rows. A query that legacy never leaves empty
-must never be empty in the library; where legacy is sometimes empty, the library
-fails only if its empty-seed count is higher with one-sided Fisher exact
-p < 0.001.
+`lo_commitdate` the legacy statistics drop the rows whose order date is
+1998-12-31, the one day the two calendars do not share, and the same rule
+applies, except that the distinct count is compared instead of the distinct
+ratio (the filter changes only the legacy denominator). `date` columns are compared by a digest of the shared rows. A query
+that legacy never leaves empty on seeds 42-46 must never be empty in the library
+on seeds 42-46. A query that legacy leaves empty on any of seeds 42-46 is judged
+on 30 seeds per side (42-71) at that scale: the library fails only if its
+empty-seed count is higher than legacy's with one-sided Fisher exact p < 0.001
+(5 against 5 seeds cannot reach that p-value).
 
 ## Layout
 
@@ -193,6 +203,19 @@ maturin develop --release && pytest tests
 output by SHA-256, and `tools/bench_budgets.py` measures the wall-time and
 peak-RSS budgets from the design ADR (`--driver` measures a compiled driver
 binary instead of the Python module).
+
+## Carried upstream patches
+
+| Patch | Fork commit | Upstream PR |
+| :--- | :--- | :--- |
+| `tpcdsgen`: let callers supply the `Scaling` used by a `Session` (`Scaling::with_row_counts`, `SessionBuilder::with_scaling`; 73 changed lines) | [`b4b072b`](https://github.com/BenchBox-dev/tpcgen-rs/commit/b4b072b3f3ceb9f2979382beb96b3a27051b57b1) on `BenchBox-dev/tpcgen-rs` branch `v4.0.0-scaling-override` (upstream `v4.0.0` plus the PR commit and nothing else) | [datafusion-contrib/tpcgen-rs#677](https://github.com/datafusion-contrib/tpcgen-rs/pull/677) |
+
+The root `Cargo.toml` pins `tpcdsgen` and `tpcdsgen-arrow` to that commit through
+`[patch.crates-io]`; the library uses the patch for TPC-DS scale factors below 1.
+Rule for removal: when a released upstream `tpcdsgen` contains the change, bump the exact
+version requirement, delete the `[patch.crates-io]` entries, regenerate `Cargo.lock` and
+`THIRD_PARTY_LICENSES`, and re-run the TPC-DS parity matrix. A carried patch stays at or below
+about 200 changed lines, is pinned by commit SHA and is never merged into a divergent fork.
 
 ## Licence
 

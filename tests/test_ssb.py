@@ -88,3 +88,16 @@ def test_out_of_range_seeds_raise_value_error(tmp_path, seed):
 
 def test_the_largest_seed_is_accepted(tmp_path):
     benchbox_datagen.write_tables("ssb", 0.01, tmp_path, format="tbl", seed=2**64 - 1)
+
+
+def test_ssb_table_scales_equal_row_counts():
+    scales = benchbox_datagen.table_scales("ssb", 0.01)
+    counts = dict(benchbox_datagen.row_counts("ssb", 0.01))
+    assert set(scales) == set(counts)
+    for table, rows in counts.items():
+        assert scales[table] == {"id_count": rows, "source_rows": rows}
+
+
+def test_ssb_refresh_sets_are_not_available(tmp_path):
+    with pytest.raises(ValueError, match="no refresh sets"):
+        benchbox_datagen.write_refresh("ssb", 0.01, tmp_path)

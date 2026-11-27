@@ -7,6 +7,8 @@ from benchbox_datagen._native import (
     key_ranges,
     row_counts,
     table_names,
+    table_scales,
+    write_refresh,
     write_tables,
 )
 
@@ -19,5 +21,7 @@ __all__ = [
     "key_ranges",
     "row_counts",
     "table_names",
+    "table_scales",
+    "write_refresh",
     "write_tables",
 ]

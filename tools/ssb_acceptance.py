@@ -26,15 +26,11 @@ EXCLUDED_ALWAYS = {
     ("lineorder", "lo_orderkey"): "order structure is 1-7 lines per order (legacy: geometric)",
     ("lineorder", "lo_linenumber"): "order structure is 1-7 lines per order (legacy: geometric)",
 }
-SHARED_DATE_COLUMNS = {
-    ("lineorder", "lo_orderdate"): 19981231,
-    ("lineorder", "lo_commitdate"): 19981231,
-}
-EXCLUDED_METRICS: dict[tuple[str, str], tuple[set[str], str]] = {
-    ("lineorder", "lo_orderdate"): ({"distinct_ratio"}, "the legacy rows dated 1998-12-31 are dropped from the denominator only, so the ratio differs by that row count while the distinct counts agree"),
-    ("lineorder", "lo_commitdate"): ({"distinct_ratio"}, "the legacy rows dated 1998-12-31 are dropped from the denominator only, so the ratio differs by that row count while the distinct counts agree"),
-}
+SHARED_DATE_COLUMNS = {"lineorder": ["lo_orderdate", "lo_commitdate"]}
+SHARED_DATE_FILTER = "lo_orderdate <> 19981231"
 EMPTY_RESULT_ALPHA = 0.001
+BASE_SEEDS = list(range(42, 47))
+EXTENDED_SEEDS = list(range(42, 72))
 EXCLUDED_WHEN_PART_ROWS_DIFFER = {("part", "p_partkey"), ("part", "p_name"), ("lineorder", "lo_partkey")}
 DATE_DIGEST_SQL = (
     "SELECT md5(string_agg(CAST(t AS VARCHAR), ',' ORDER BY d_datekey)) "
@@ -78,10 +74,10 @@ def column_stats(
 ) -> dict[str, dict]:
     result = _column_stats(con, source, table, [name for name, _, _ in SCHEMAS[table]])
     if legacy:
-        for (shared_table, name), unshared in SHARED_DATE_COLUMNS.items():
-            if shared_table == table:
-                shared = f"(SELECT * FROM {source} WHERE {name} <> {unshared})"
-                result["columns"].update(_column_stats(con, shared, table, [name])["columns"])
+        shared_columns = SHARED_DATE_COLUMNS.get(table)
+        if shared_columns:
+            shared = f"(SELECT * FROM {source} WHERE {SHARED_DATE_FILTER})"
+            result["columns"].update(_column_stats(con, shared, table, shared_columns)["columns"])
     return result
 
 
@@ -144,7 +140,7 @@ def tbl_sources(directory: Path) -> dict[str, str]:
     return sources
 
 
-def run_legacy(scale_factor: float, seed: int, workdir: Path) -> dict:
+def run_legacy(scale_factor: float, seed: int, workdir: Path, queries_only: bool = False) -> dict:
     from benchbox.core.ssb.generator import SSBDataGenerator
 
     out = Path(tempfile.mkdtemp(prefix=f"legacy-{seed}-", dir=workdir))
@@ -154,6 +150,8 @@ def run_legacy(scale_factor: float, seed: int, workdir: Path) -> dict:
         started = time.monotonic()
         generator.generate_data()
         seconds = time.monotonic() - started
+        if queries_only:
+            return {"seed": seed, "generate_seconds": seconds, "query_rows": query_row_counts(tbl_sources(out))}
         stats = table_stats(duckdb.connect(config={"threads": 4, "memory_limit": "2GB"}), tbl_sources(out), legacy=True)
         sources = tbl_sources(out)
         digest = duckdb.connect().execute(DATE_DIGEST_SQL.format(source=sources["date"])).fetchone()[0]
@@ -177,7 +175,7 @@ def cmd_legacy(args: argparse.Namespace) -> None:
     for seed in args.seeds:
         if seed in done:
             continue
-        runs.append(run_legacy(args.scale, seed, workdir))
+        runs.append(run_legacy(args.scale, seed, workdir, args.queries_only))
         partial.write_text(json.dumps({"scale": args.scale, "runs": runs}))
     Path(args.out).write_text(json.dumps({"scale": args.scale, "runs": runs}))
     partial.unlink()
@@ -202,6 +200,9 @@ def cmd_library(args: argparse.Namespace) -> None:
         out = Path(tempfile.mkdtemp(prefix=f"library-{seed}-", dir=workdir))
         try:
             library_write(args.scale, seed, out)
+            if args.queries_only:
+                runs.append({"seed": seed, "query_rows": query_row_counts(parquet_sources(out))})
+                continue
             runs.append(
                 {
                     "seed": seed,
@@ -286,21 +287,9 @@ def compare_stats(legacy: dict, library_run: dict) -> list[dict]:
                 )
                 continue
             legacy_entries = [run["tables"][table]["columns"][name] for run in legacy["runs"]]
-            for metric in METRICS:
+            metrics = ["distinct" if m == "distinct_ratio" and name in SHARED_DATE_COLUMNS.get(table, []) else m for m in METRICS]
+            for metric in metrics:
                 legacy_values = [e[metric] for e in legacy_entries]
-                metrics_excluded, reason = EXCLUDED_METRICS.get((table, name), (set(), ""))
-                if metric in metrics_excluded:
-                    findings.append(
-                        {
-                            "table": table,
-                            "column": name,
-                            "metric": metric,
-                            "new": entry[metric],
-                            "legacy": reason,
-                            "verdict": "excluded",
-                        }
-                    )
-                    continue
                 verdict = judge(entry[metric], legacy_values)
                 if verdict == "FAIL" and metric in QUANTILE_METRICS and "cdf" in entry:
                     if rank_ok(QUANTILE_METRICS[metric], legacy_values, entry["cdf"], library_run["tables"][table]["rows"]):
@@ -346,12 +335,30 @@ def empty_result_rule(legacy_rows: list[int], library_rows: list[int]) -> dict:
     return {"legacy_empty": legacy_empty, "library_empty": library_empty, "p_value": p_value, "ok": ok}
 
 
-def query_rule(legacy: dict, library: dict) -> dict[str, dict]:
+def seed_rows(base: dict, extra: dict | None, query_id: str, seeds: list[int]) -> list[int]:
+    by_seed = {run["seed"]: run["query_rows"][query_id] for run in base["runs"]}
+    if extra:
+        by_seed.update({run["seed"]: run["query_rows"][query_id] for run in extra["runs"]})
+    missing = [seed for seed in seeds if seed not in by_seed]
+    if missing:
+        raise SystemExit(f"{query_id}: no query row counts for seeds {missing}")
+    return [by_seed[seed] for seed in seeds]
+
+
+def query_rule(legacy: dict, library: dict, legacy_extra: dict | None = None, library_extra: dict | None = None) -> dict[str, dict]:
     result = {}
     for query_id in legacy["runs"][0]["query_rows"]:
-        legacy_rows = [run["query_rows"][query_id] for run in legacy["runs"]]
-        library_rows = [run["query_rows"][query_id] for run in library["runs"]]
-        result[query_id] = {"legacy": legacy_rows, "library": library_rows, **empty_result_rule(legacy_rows, library_rows)}
+        legacy_rows = seed_rows(legacy, None, query_id, BASE_SEEDS)
+        library_rows = seed_rows(library, None, query_id, BASE_SEEDS)
+        if any(n == 0 for n in legacy_rows):
+            legacy_rows = seed_rows(legacy, legacy_extra, query_id, EXTENDED_SEEDS)
+            library_rows = seed_rows(library, library_extra, query_id, EXTENDED_SEEDS)
+        result[query_id] = {
+            "seeds": len(legacy_rows),
+            "legacy": legacy_rows,
+            "library": library_rows,
+            **empty_result_rule(legacy_rows, library_rows),
+        }
     return result
 
 
@@ -365,7 +372,10 @@ def cmd_compare(args: argparse.Namespace) -> None:
         for finding in findings:
             counts[finding["verdict"]] += 1
         summary["seeds"][seed] = {"counts": counts, "details": [f for f in findings if f["verdict"] != "ok"]}
-    summary["queries"] = query_rule(legacy, library)
+    def optional(path: str | None) -> dict | None:
+        return json.loads(Path(path).read_text()) if path else None
+
+    summary["queries"] = query_rule(legacy, library, optional(args.legacy_queries), optional(args.library_queries))
     for run in legacy["runs"]:
         summary.setdefault("legacy_rows", {}).update({t: run["tables"][t]["rows"] for t in TABLES})
     summary["library_rows"] = {t: library["runs"][0]["tables"][t]["rows"] for t in TABLES}
@@ -525,13 +535,13 @@ def cmd_report(args: argparse.Namespace) -> None:
         shown = ", ".join(f"{v:.6g}" if isinstance(v, (int, float)) else str(v) for v in legacy) if isinstance(legacy, list) else str(legacy)
         new = f"{f['new']:.6g}" if isinstance(f["new"], (int, float)) else str(f["new"])
         lines.append(f"| {sf_name(scale)} | {f['table']}.{f['column']} | {f['metric']} | {new} | {shown} | {f['verdict']} |")
-    lines += ["", "### Empty-result rule (library seeds 42-46 against legacy seeds 42-46)", ""]
+    lines += ["", "### Empty-result rule (seeds 42-46 per side; seeds 42-71 per side for queries legacy leaves empty on any of 42-46)", ""]
     lines += ["| SF | queries empty on some legacy seed | rule violations |", "|---|---|---|"]
     for scale in (0.01, 0.1, 1.0):
         compare = load(base / f"compare_{sf_name(scale)}.json")
         if compare is None:
             continue
-        sometimes = [f"{q} ({v['legacy_empty']} legacy / {v['library_empty']} library empty seeds)" for q, v in compare["queries"].items() if v["legacy_empty"]]
+        sometimes = [f"{q} ({v['legacy_empty']} legacy / {v['library_empty']} library empty of {v['seeds']} seeds, p={v['p_value']:.3g})" for q, v in compare["queries"].items() if v["legacy_empty"]]
         bad = [q for q, v in compare["queries"].items() if not v["ok"]]
         lines.append(f"| {sf_name(scale)} | {', '.join(sometimes) or 'none'} | {', '.join(bad) or 'none'} |")
     lines += ["", "### SSB queries (BenchBox query texts, default parameters)", ""]
@@ -570,13 +580,16 @@ def main() -> None:
     for name, handler in [("legacy", cmd_legacy), ("library", cmd_library)]:
         command = sub.add_parser(name)
         command.add_argument("--scale", type=float, required=True)
-        command.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
+        command.add_argument("--seeds", type=int, nargs="+", default=BASE_SEEDS)
         command.add_argument("--workdir", required=True)
         command.add_argument("--out", required=True)
+        command.add_argument("--queries-only", action="store_true")
         command.set_defaults(handler=handler)
     command = sub.add_parser("compare")
     command.add_argument("--legacy", required=True)
     command.add_argument("--library", required=True)
+    command.add_argument("--legacy-queries")
+    command.add_argument("--library-queries")
     command.add_argument("--out", required=True)
     command.set_defaults(handler=cmd_compare)
     command = sub.add_parser("verify")
