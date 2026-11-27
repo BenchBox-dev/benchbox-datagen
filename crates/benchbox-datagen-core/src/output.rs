@@ -126,7 +126,7 @@ fn write_with(
     cancel: &AtomicBool,
     chunk_rows: Option<u64>,
 ) -> Result<Vec<FileStats>, Error> {
-    validate_scale_factor(request.scale_factor)?;
+    validate_scale_factor(request.benchmark, request.scale_factor)?;
     if request.parts < 1 {
         return Err(Error::InvalidParts(request.parts));
     }

@@ -199,6 +199,19 @@ def test_dsqgen_rowcount_inputs_equal_the_patched_dsdgen_values(scale):
         assert scales[table]["source_rows"] == expected[table], table
 
 
+@pytest.mark.parametrize("scale", [1.5, 2.5])
+def test_non_integer_scale_factors_of_one_or_more_are_rejected(scale):
+    with pytest.raises(ValueError, match="whole numbers"):
+        benchbox_datagen.row_counts("tpcds", scale)
+    with pytest.raises(ValueError, match="whole numbers"):
+        benchbox_datagen.generate_table("tpcds", "item", scale)
+
+
+@pytest.mark.parametrize("scale", [0.29, 2.0])
+def test_fractional_and_integer_scale_factors_are_accepted(scale):
+    assert benchbox_datagen.row_counts("tpcds", scale)["item"] > 0
+
+
 def test_subscale_row_counts_use_the_proportional_model_with_a_one_row_floor():
     counts = benchbox_datagen.row_counts("tpcds", 0.01)
     assert counts["store"] == counts["call_center"] == counts["warehouse"] == 1

@@ -24,7 +24,7 @@ pinned by exact version. This project does not fork them: fixes go upstream, and
 patch carried until upstream releases it is listed under
 [Carried upstream patches](#carried-upstream-patches).
 
-Today the library generates TPC-H (all eight tables, any scale factor) and TPC-DS (the 24 benchmark tables at any scale factor, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) as
+Today the library generates TPC-H (all eight tables, any scale factor) and TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
 `NOT NULL` columns non-nullable). Delimited output is byte-identical to the
@@ -119,7 +119,7 @@ peak-RSS budgets from the design ADR.
 
 | Patch | Fork commit | Upstream PR |
 | :--- | :--- | :--- |
-| `tpcdsgen`: let callers supply the `Scaling` used by a `Session` (`Scaling::with_row_counts`, `SessionBuilder::with_scaling`; 73 changed lines) | [`9bde8d8`](https://github.com/BenchBox-dev/tpcgen-rs/commit/9bde8d82d93574628b30c27c50b8c7bde274f047) on `BenchBox-dev/tpcgen-rs` branch `v4.0.0-scaling-override` (upstream `v4.0.0` plus the PR commit and nothing else) | [datafusion-contrib/tpcgen-rs#677](https://github.com/datafusion-contrib/tpcgen-rs/pull/677) |
+| `tpcdsgen`: let callers supply the `Scaling` used by a `Session` (`Scaling::with_row_counts`, `SessionBuilder::with_scaling`; 73 changed lines) | [`b4b072b`](https://github.com/BenchBox-dev/tpcgen-rs/commit/b4b072b3f3ceb9f2979382beb96b3a27051b57b1) on `BenchBox-dev/tpcgen-rs` branch `v4.0.0-scaling-override` (upstream `v4.0.0` plus the PR commit and nothing else) | [datafusion-contrib/tpcgen-rs#677](https://github.com/datafusion-contrib/tpcgen-rs/pull/677) |
 
 The root `Cargo.toml` pins `tpcdsgen` and `tpcdsgen-arrow` to that commit through
 `[patch.crates-io]`; the library uses the patch for TPC-DS scale factors below 1.

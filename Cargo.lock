@@ -1080,12 +1080,12 @@ dependencies = [
 [[package]]
 name = "tpcdsgen"
 version = "4.0.0"
-source = "git+https://github.com/BenchBox-dev/tpcgen-rs?rev=9bde8d82d93574628b30c27c50b8c7bde274f047#9bde8d82d93574628b30c27c50b8c7bde274f047"
+source = "git+https://github.com/BenchBox-dev/tpcgen-rs?rev=b4b072b3f3ceb9f2979382beb96b3a27051b57b1#b4b072b3f3ceb9f2979382beb96b3a27051b57b1"
 
 [[package]]
 name = "tpcdsgen-arrow"
 version = "4.0.0"
-source = "git+https://github.com/BenchBox-dev/tpcgen-rs?rev=9bde8d82d93574628b30c27c50b8c7bde274f047#9bde8d82d93574628b30c27c50b8c7bde274f047"
+source = "git+https://github.com/BenchBox-dev/tpcgen-rs?rev=b4b072b3f3ceb9f2979382beb96b3a27051b57b1#b4b072b3f3ceb9f2979382beb96b3a27051b57b1"
 dependencies = [
  "arrow",
  "tpcdsgen",

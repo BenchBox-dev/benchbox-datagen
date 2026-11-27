@@ -212,10 +212,34 @@ fn write_refresh(
     rng_seed: Option<i32>,
 ) -> PyResult<Vec<FileStat>> {
     let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
-    let stats = py
-        .detach(|| write_refresh_sets(benchmark, scale_factor, sets, rng_seed, &output_dir))
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let cancel = Arc::clone(&cancel);
+        thread::spawn(move || {
+            write_refresh_sets(
+                benchmark,
+                scale_factor,
+                sets,
+                rng_seed,
+                &output_dir,
+                &cancel,
+            )
+        })
+    };
+    while !worker.is_finished() {
+        py.detach(|| thread::sleep(SIGNAL_POLL));
+        if let Err(signal) = py.check_signals() {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = py.detach(|| worker.join());
+            return Err(signal);
+        }
+    }
+    let stats = worker
+        .join()
+        .map_err(|_| PyRuntimeError::new_err("the refresh writer thread panicked"))?
         .map_err(|error| match error {
             Error::Write(message) => PyOSError::new_err(message),
+            Error::Cancelled => PyRuntimeError::new_err(error.to_string()),
             other => value_error(other),
         })?;
     Ok(stats.into_iter().map(FileStat::from).collect())
