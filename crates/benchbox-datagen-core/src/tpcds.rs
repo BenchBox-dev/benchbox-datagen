@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::ops::RangeInclusive;
 
 use benchbox_datagen_writers::DelimitedBuffer;
-use tpcdsgen::config::{CompatMode, Session, SessionBuilder, Table};
+use tpcdsgen::config::{CompatMode, Scaling, Session, SessionBuilder, Table};
 use tpcdsgen::row::{
     CallCenterRowGenerator, CatalogPageRowGenerator, CatalogReturnsRowGenerator,
     CatalogSalesRowGenerator, CustomerAddressRowGenerator, CustomerDemographicsRowGenerator,
@@ -20,7 +20,7 @@ use tpcdsgen_arrow::{
     WarehouseArrow, WebPageArrow, WebReturnsArrow, WebSalesArrow, WebSiteArrow,
 };
 
-use crate::{BatchReader, dsgen, schema};
+use crate::BatchReader;
 
 pub(crate) const TABLES: [&str; 24] = [
     "call_center",
@@ -53,18 +53,24 @@ pub(crate) const FULL_MODEL_SCALE_FACTOR: f64 = 1.0;
 const FLUSH_BYTES: usize = 1 << 20;
 const SPLIT_THRESHOLD_ROWS: u64 = 1_000_000;
 
+fn scaling(scale_factor: f64) -> Scaling {
+    let scaling = Scaling::new_with_compat(scale_factor, CompatMode::C);
+    if scale_factor >= FULL_MODEL_SCALE_FACTOR {
+        return scaling;
+    }
+    scaling.with_row_counts(TABLES.map(|name| (table(name), source_rows(name, scale_factor))))
+}
+
 fn session(scale_factor: f64) -> Session {
     SessionBuilder::new()
-        .with_scale_factor(scale_factor)
-        .with_compat_mode(CompatMode::C)
+        .with_scaling(scaling(scale_factor))
         .build()
         .expect("scale factor was validated by the caller")
 }
 
 fn chunk_session(scale_factor: f64, part: i32, parts: i32) -> Session {
     SessionBuilder::new()
-        .with_scale_factor(scale_factor)
-        .with_compat_mode(CompatMode::C)
+        .with_scaling(scaling(scale_factor))
         .with_chunk_number(part)
         .with_total_chunks(parts)
         .build()
@@ -111,9 +117,7 @@ const STATIC_BELOW_ONE: [&str; 6] = [
 ];
 
 fn upstream_rows(name: &str, scale_factor: f64) -> u64 {
-    session(scale_factor)
-        .get_scaling()
-        .get_row_count(table(name))
+    Scaling::new_with_compat(scale_factor, CompatMode::C).get_row_count(table(name))
 }
 
 pub(crate) fn history_ids(rows: u64) -> u64 {
@@ -211,44 +215,13 @@ fn drain<W: Write, R: std::fmt::Display>(
     Ok(buffer.rows())
 }
 
-fn row_count_differs(name: &str, scale_factor: f64) -> bool {
-    scale_factor < FULL_MODEL_SCALE_FACTOR
-        && upstream_rows(name, scale_factor) != source_rows(name, scale_factor)
-}
-
 macro_rules! dispatch {
     ($(($name:literal, $generator:ident, $arrow:ident)),* $(,)?) => {
-        fn dat_rows(
-            name: &str,
-            scale_factor: f64,
-            range: RangeInclusive<u64>,
-        ) -> Box<dyn Iterator<Item = String> + Send> {
-            if dsgen::generates(name, scale_factor) {
-                return dsgen::rows(name, scale_factor, range);
-            }
-            let session = session(scale_factor);
-            let source_rows = source_rows(name, scale_factor);
-            match name {
-                $($name => {
-                    let mut rows = $generator::new(session, source_rows);
-                    rows.set_source_row_range(*range.start(), *range.end());
-                    Box::new(rows.map(|row| row.to_string()))
-                })*
-                other => unreachable!("table {other:?} was validated by the caller"),
-            }
-        }
-
         pub(crate) fn batches(
             name: &str,
             scale_factor: f64,
             range: RangeInclusive<u64>,
         ) -> BatchReader {
-            if dsgen::generates(name, scale_factor) || row_count_differs(name, scale_factor) {
-                return dsgen::batches(
-                    dat_rows(name, scale_factor, range),
-                    schema::tpcds(name).expect("every tpcds table has a schema"),
-                );
-            }
             let session = session(scale_factor);
             match name {
                 $($name => Box::new(
@@ -264,9 +237,6 @@ macro_rules! dispatch {
             range: RangeInclusive<u64>,
             sink: &mut W,
         ) -> io::Result<u64> {
-            if dsgen::generates(name, scale_factor) {
-                return drain(dsgen::rows(name, scale_factor, range), sink);
-            }
             let session = session(scale_factor);
             let source_rows = source_rows(name, scale_factor);
             match name {
@@ -284,9 +254,6 @@ macro_rules! dispatch {
             scale_factor: f64,
             range: RangeInclusive<u64>,
         ) -> u64 {
-            if dsgen::generates(name, scale_factor) {
-                return dsgen::rows(name, scale_factor, range).count() as u64;
-            }
             let session = session(scale_factor);
             let source_rows = source_rows(name, scale_factor);
             match name {
