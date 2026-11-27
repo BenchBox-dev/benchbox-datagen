@@ -22,11 +22,12 @@ TPC generation depends on the upstream Apache-2.0 crates from
 [`datafusion-contrib/tpcgen-rs`](https://github.com/datafusion-contrib/tpcgen-rs),
 pinned by exact version. This project does not fork them: fixes go upstream.
 
-Today the library generates TPC-H (all eight tables, any scale factor) and SSB (all five tables, any scale factor) as
+Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factor 1 or above, in `CompatMode::C`, byte-identical to the bundled `dsdgen`) and SSB (all five tables, any scale factor) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
-`NOT NULL` columns non-nullable). Delimited `.tbl` output is byte-identical to
-the bundled `dbgen` output with the trailing `|` removed, for every table.
+`NOT NULL` columns non-nullable). Delimited output is byte-identical to the
+bundled `dbgen` / `dsdgen -TERMINATE n` output (no trailing `|`), for every table.
+TPC-DS below scale factor 1 is refused until fractional scales are implemented.
 Parquet output is written in Rust with 122,880-row row groups and the
 `benchbox.parquet_writer=benchbox-datagen-<major>` key-value entry; neither
 format's bytes depend on the thread count. SSB output is described under
@@ -54,6 +55,9 @@ import benchbox_datagen
 
 counts = benchbox_datagen.row_counts("tpch", 10.0)
 assert counts["lineitem"] == 59_986_052
+
+ranges = benchbox_datagen.key_ranges("tpcds", 10.0)
+assert ranges["item"]["i_item_sk"] == (1, 102_000)
 
 ranges = benchbox_datagen.key_ranges("ssb", 10.0)
 assert ranges["lineorder"]["lo_custkey"] == (1, 300_000)
@@ -94,18 +98,20 @@ the output and is a generator version bump that refreezes the golden hashes.
 - **Independent streams.** Each block draws from its own ChaCha8 stream
   (`rand_chacha`, pinned to an exact version) keyed by `(benchmark, table,
   stream name, seed, block)`. The 256-bit key is derived with FNV-1a 64 over
-  the domain string `benchbox-datagen/synthetic/v1` and the names, then a
-  SplitMix64 finalizer over the seed and block index. A table may use several
-  named streams (SSB `lineorder` uses `fields` and `orders`).
-- **Owned sampling.** Bounded integers use a widening multiply (32-bit draw
-  for bounds up to 65,536, 64-bit otherwise), floats use the top 53 bits of a
+  the domain string `benchbox-datagen/synthetic/v1` and the names, then over
+  the seed as its own 8-byte field (so no seed can alias another stream's
+  names), then a SplitMix64 finalizer over the block index. A table may use
+  several named streams (SSB `lineorder` uses `fields` and `orders`).
+- **Owned sampling.** Bounded integers use an unbiased widening multiply with
+  Lemire rejection (32-bit draw for bounds up to 65,536, 64-bit otherwise), floats use the top 53 bits of a
   draw, choices and word lists index a slice, weighted choices search a
   cumulative integer table, and dates use integer civil-calendar arithmetic.
   Nothing depends on the platform's floating-point library; any
   transcendental function must come from the pure-Rust `libm` crate.
 - **Cross-block state** (for example SSB order numbering) comes from a
-  separate cheap stream that is summed once per table (a prefix pass), never
-  from sequential generation, so blocks stay independent.
+  separate cheap stream that is summed over whole orders (a prefix pass built
+  only up to the block being generated and checked for cancellation between
+  blocks), never from sequential generation, so blocks stay independent.
 - **Rows and parts.** A table implements `schema()`, `rows()` and
   `block(index) -> RecordBatch`. `parts` splits a table into contiguous row
   ranges (blocks are sliced at the range edges), so concatenating the part
@@ -115,7 +121,7 @@ the output and is a generator version bump that refreezes the golden hashes.
   delimiter, nulls empty and dates as `YYYY-MM-DD`. Parquet carries the same
   Arrow types as the BenchBox schema dump (`tests/data/<benchmark>_arrow_schemas.json`,
   refreshed with `tools/dump_benchbox_schemas.py <benchmark>`).
-- **Seeds.** A `u64`, default 42. Row counts never depend on the seed.
+- **Seeds.** A `u64` (`0` to `2**64 - 1`; Python raises `ValueError` outside that range), default 42. Row counts never depend on the seed.
 
 ### SSB
 
@@ -173,9 +179,10 @@ uv venv && uv pip install maturin pyarrow pytest
 maturin develop --release && pytest tests
 ```
 
-`tools/parity_tpch.py` compares library output with a directory of `dbgen`
-output by SHA-256, and `tools/bench_budgets.py --benchmark tpch|ssb` measures the
-wall-time and peak-RSS budgets from the design ADR.
+`tools/parity.py` compares library output with a directory of `dbgen`
+output by SHA-256, and `tools/bench_budgets.py` measures the wall-time and
+peak-RSS budgets from the design ADR (`--driver` measures a compiled driver
+binary instead of the Python module).
 
 ## Licence
 

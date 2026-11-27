@@ -7,6 +7,18 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "THIRD_PARTY_LICENSES"
 
 
+def tpc_notice(packages: dict, seen: set[str]) -> str:
+    package = next(packages[pid] for pid in seen if packages[pid]["name"] == "tpcdsgen")
+    source = Path(package["manifest_path"]).parent / "data" / "calendar.dst"
+    lines = source.read_text().splitlines()
+    end = next(index for index, line in enumerate(lines) if line.startswith("-- Contributors:"))
+    notice = "\n".join(line.removeprefix("--").strip() and line.removeprefix("-- ").rstrip() for line in lines[:end]).strip()
+    return (
+        "================================================================================\n"
+        f"TPC LEGAL NOTICE from {package['name']} {package['version']} (data/calendar.dst)\n\n{notice}\n"
+    )
+
+
 def render() -> str:
     licences = subprocess.run(
         ["cargo", "about", "generate", "--locked", "about.hbs"],
@@ -48,6 +60,7 @@ def render() -> str:
                 f"================================================================================\n"
                 f"NOTICE from {package['name']} {package['version']}\n\n{notice.read_text().strip()}\n"
             )
+    notices.append(tpc_notice(packages, seen))
     return licences.rstrip() + "\n\n" + "\n".join(notices)
 
 

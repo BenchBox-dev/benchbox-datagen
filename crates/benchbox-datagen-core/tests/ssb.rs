@@ -23,25 +23,25 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "tbl",
         "0.01",
         "customer",
-        "97cde325ca30135b82f59d2e363f03bd7fca1837715a75abf8b45c58bbfd168c",
+        "0536755eb97daae0745a94e8fc5a56efd30b3bdecbb066c2fc7c578660021a2a",
     ),
     (
         "tbl",
         "0.01",
         "supplier",
-        "3e9774c5a753ff12f5cf59e778d6d7ea639cc459fe9e610e870b8f3d048e7bf8",
+        "64ec3188297a2b48d2eea1fd263ce12d1fb8ade397027ac2c3d121e5950cbe17",
     ),
     (
         "tbl",
         "0.01",
         "part",
-        "d4626d548c0f6b17a9f6fc762f69f3c96fb78d8caa04ba1e925a3af39f818455",
+        "039990d2bc54034c23db10e6b946c6b3c1f0ee035828f7c08a65125a711aad42",
     ),
     (
         "tbl",
         "0.01",
         "lineorder",
-        "8d28704635cc7339c10c789acd4308aacefc3214e83b09a5b0c686c055d3c5f5",
+        "a913882b75645780ba3aea1f12b41a8c2ecc08bb7fe7257630bb78935e29c2b8",
     ),
     (
         "tbl",
@@ -53,25 +53,25 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "tbl",
         "0.1",
         "customer",
-        "d9430a711d2465d358b134279935299b1c6a37a5888be5d6e7eeb019ebf322e3",
+        "661ae2b22d9349e2f912de23d72864f9415b2a2f0fd6ff4aa7a9fb2cf95d5a9f",
     ),
     (
         "tbl",
         "0.1",
         "supplier",
-        "ccd7702880147609b1724f44a289fc1dbdc833cd45ed763b92b4620b308f4062",
+        "685cd5fbcc025c7fe2c69b07e11d5a0c13a87c332be051ea7e8317aa5cde4b84",
     ),
     (
         "tbl",
         "0.1",
         "part",
-        "cf3c42436b27328bf56f480e22bdf4b520c95e04aed0f4f363d2c8a2c211611c",
+        "5aac5dfa6357ba574bb456ce464972a0434fac8990e377a8726301f9e5985e54",
     ),
     (
         "tbl",
         "0.1",
         "lineorder",
-        "7739b01ebb3283b18bb099ef91d1788e25db7539c174b74bd4e5ed55ef708257",
+        "244b5d6a549521d2436bc74ecd49593af9b17910e6c330f5c8ad49ca26037c7a",
     ),
     (
         "parquet",
@@ -83,25 +83,25 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "parquet",
         "0.01",
         "customer",
-        "aa2ab312d0d0e9d6153cb2713b670db6c42ca9a5b46eb580f4fed12b55c50d29",
+        "2f59a4621d95858be10464a7b45dda460b6ec3a81e10c094efcafad72d671e28",
     ),
     (
         "parquet",
         "0.01",
         "supplier",
-        "9dcfeb3d8162f91ca3298c717d50290e1bf94a20260c779422f00fc99e4e667e",
+        "099764086e402c7131a1583a0141d3629d760057b20f2c84c85d234bd7ff92a5",
     ),
     (
         "parquet",
         "0.01",
         "part",
-        "feeee106b763960e0345cb9acc34207f3340300dcdbb6e7ce6b07548d70de3c3",
+        "29c964cf2f9f797372adf9bdf3880f9154a59410d9c87ee9682d259f67fe5236",
     ),
     (
         "parquet",
         "0.01",
         "lineorder",
-        "b678c19b0cf2a8aaa789e22794c41df3b948399ce19a50f6e76b4e9be409df03",
+        "3da35a0ececfbcef97c9fde65f216676d785f2244d589582f3d36d3b44a2f834",
     ),
     (
         "parquet",
@@ -113,25 +113,25 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "parquet",
         "0.1",
         "customer",
-        "d62965f89c7f5f1382b66bd9d6d266e1272499197bc0a35f91921690071148af",
+        "aa8449cd5266418b4d46fa514361272c0889ed53d3122d7e938bf603aab6f59e",
     ),
     (
         "parquet",
         "0.1",
         "supplier",
-        "4035a78ad1667276d8bacce05530038f699edf360489a539ab84cfb9e758d379",
+        "c9cfe7c0b590a46b30614d674be46f59a00d1bfdd075841d2f4fc65652206c9f",
     ),
     (
         "parquet",
         "0.1",
         "part",
-        "8df9b63b9c23ab0b098f0b823c00930bf03e5fb26d1b32f143f0a97c88264adc",
+        "b889aadfc08e84ea5eed6419d76bb9f9cfe89ee166049cb574fb38730b3c7b3d",
     ),
     (
         "parquet",
         "0.1",
         "lineorder",
-        "aae9bbfc33dffae55730061f047c387e412027f9b5f73ab4b7b2af7b5e1720cd",
+        "63e60b36ddbe2b317353cf4360f7219c27901b8c6e9be4f97170368a8492d615",
     ),
 ];
 
@@ -374,5 +374,100 @@ fn golden_hashes_are_frozen() {
                 .unwrap_or_else(|| panic!("missing golden {name} {scale} {table}: {hash}"));
             assert_eq!(expected.3, hash, "{name} sf={scale} {table}");
         }
+    }
+}
+
+fn whole_table(table: &str, scale_factor: f64) -> arrow::record_batch::RecordBatch {
+    let batches: Vec<_> = record_batches(&table_request(table, scale_factor, None))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap()
+}
+
+fn part_table(
+    table: &str,
+    scale_factor: f64,
+    part: i32,
+    parts: i32,
+) -> arrow::record_batch::RecordBatch {
+    let request = TableRequest {
+        part,
+        parts,
+        ..table_request(table, scale_factor, None)
+    };
+    let reader = record_batches(&request).unwrap();
+    let schema = reader.schema();
+    let batches: Vec<_> = reader.map(Result::unwrap).collect();
+    arrow::compute::concat_batches(&schema, &batches).unwrap()
+}
+
+#[test]
+fn generate_table_parts_equal_the_matching_slice_of_the_whole_table() {
+    let parts = 3;
+    for table in ["customer", "supplier", "part", "lineorder"] {
+        let whole = whole_table(table, 0.1);
+        let rows = whole.num_rows() as u128;
+        for part in 1..=parts {
+            let start = (rows * (part as u128 - 1) / parts as u128) as usize;
+            let end = (rows * part as u128 / parts as u128) as usize;
+            assert_eq!(
+                part_table(table, 0.1, part, parts),
+                whole.slice(start, end - start),
+                "{table} part {part}"
+            );
+        }
+    }
+    let whole = whole_table("date", 0.1);
+    assert_eq!(part_table("date", 0.1, 1, 3), whole);
+    assert_eq!(part_table("date", 0.1, 2, 3).num_rows(), 0);
+}
+
+#[test]
+fn parquet_parts_hold_the_rows_of_the_single_file() {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let (whole, split) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write_benchmark(&request(
+        whole.path(),
+        Format::Parquet,
+        Some(2),
+        1,
+        0.1,
+        None,
+    ))
+    .unwrap();
+    let stats = write_benchmark(&request(
+        split.path(),
+        Format::Parquet,
+        Some(3),
+        3,
+        0.1,
+        None,
+    ))
+    .unwrap();
+    let read = |path: &Path| {
+        let reader = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        reader.map(Result::unwrap).collect::<Vec<_>>()
+    };
+    for table in TABLES {
+        let files: Vec<_> = stats.iter().filter(|stats| stats.table == table).collect();
+        assert_eq!(files.len(), if table == "date" { 1 } else { 3 }, "{table}");
+        let expected = read(&whole.path().join(format!("{table}.parquet")));
+        let schema = expected[0].schema();
+        let expected = arrow::compute::concat_batches(&schema, &expected).unwrap();
+        let joined: Vec<_> = files.iter().flat_map(|file| read(&file.path)).collect();
+        assert_eq!(
+            arrow::compute::concat_batches(&schema, &joined).unwrap(),
+            expected,
+            "{table}"
+        );
+        assert_eq!(
+            files.iter().map(|file| file.rows).sum::<u64>(),
+            expected.num_rows() as u64
+        );
     }
 }

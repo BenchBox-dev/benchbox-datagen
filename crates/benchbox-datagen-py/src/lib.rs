@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use benchbox_datagen_core::{
     Benchmark, Error, FileStats, OutputRequest, TableRequest, key_ranges, record_batches,
-    row_counts, write_benchmark_cancellable,
+    row_counts_cancellable, write_benchmark_cancellable,
 };
-use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_arrow::PyRecordBatchReader;
@@ -18,6 +18,19 @@ const SIGNAL_POLL: Duration = Duration::from_millis(20);
 
 fn value_error(error: Error) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+fn seed_value(seed: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u64>> {
+    seed.map(|seed| {
+        seed.extract::<u64>().map_err(|error| {
+            if error.is_instance_of::<PyOverflowError>(seed.py()) {
+                PyValueError::new_err("seed must be between 0 and 2**64 - 1")
+            } else {
+                error
+            }
+        })
+    })
+    .transpose()
 }
 
 #[pyclass(frozen, module = "benchbox_datagen._native")]
@@ -48,8 +61,9 @@ fn generate_table(
     scale_factor: f64,
     part: i32,
     parts: i32,
-    seed: Option<u64>,
+    seed: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<TableStream> {
+    let seed = seed_value(seed)?;
     let request = TableRequest {
         benchmark: benchmark.parse().map_err(value_error)?,
         table: table.to_owned(),
@@ -114,15 +128,10 @@ fn write_tables(
     compression: Option<&str>,
     threads: Option<usize>,
     parts: i32,
-    seed: Option<u64>,
+    seed: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Vec<FileStat>> {
-    let threads = match threads {
-        None => None,
-        Some(count) => Some(
-            NonZeroUsize::new(count)
-                .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))?,
-        ),
-    };
+    let seed = seed_value(seed)?;
+    let threads = non_zero_threads(threads)?;
     let request = OutputRequest {
         benchmark: benchmark.parse().map_err(value_error)?,
         scale_factor,
@@ -165,16 +174,45 @@ fn write_tables(
     Ok(stats.into_iter().map(FileStat::from).collect())
 }
 
+fn non_zero_threads(threads: Option<usize>) -> PyResult<Option<NonZeroUsize>> {
+    threads
+        .map(|count| {
+            NonZeroUsize::new(count)
+                .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))
+        })
+        .transpose()
+}
+
 #[pyfunction(name = "row_counts")]
+#[pyo3(signature = (benchmark, scale_factor, threads = None))]
 fn row_counts_py<'py>(
     py: Python<'py>,
     benchmark: &str,
     scale_factor: f64,
+    threads: Option<usize>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
-    let counts = py
-        .detach(|| row_counts(benchmark, scale_factor))
-        .map_err(value_error)?;
+    let threads = non_zero_threads(threads)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let cancel = Arc::clone(&cancel);
+        thread::spawn(move || row_counts_cancellable(benchmark, scale_factor, threads, &cancel))
+    };
+    while !worker.is_finished() {
+        py.detach(|| thread::sleep(SIGNAL_POLL));
+        if let Err(signal) = py.check_signals() {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = py.detach(|| worker.join());
+            return Err(signal);
+        }
+    }
+    let counts = worker
+        .join()
+        .map_err(|_| PyRuntimeError::new_err("the row counting thread panicked"))?
+        .map_err(|error| match error {
+            Error::Cancelled => PyRuntimeError::new_err(error.to_string()),
+            other => value_error(other),
+        })?;
     let result = PyDict::new(py);
     for (table, rows) in counts {
         result.set_item(table, rows)?;

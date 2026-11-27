@@ -16,6 +16,10 @@ BUDGETS = {
     ("tpch", 1.0, "parquet"): (4.0, 1536),
     ("tpch", 10.0, "tbl"): (30.0, 2048),
     ("tpch", 10.0, "parquet"): (40.0, 2048),
+    ("tpcds", 1.0, "tbl"): (3.0, 1024),
+    ("tpcds", 1.0, "parquet"): (4.0, 1024),
+    ("tpcds", 10.0, "tbl"): (30.0, 2048),
+    ("tpcds", 10.0, "parquet"): (40.0, 2048),
     ("ssb", 1.0, "tbl"): (5.0, 512),
     ("ssb", 1.0, "parquet"): (6.0, 512),
     ("ssb", 10.0, "tbl"): (50.0, 1024),
@@ -68,7 +72,7 @@ def measure(benchmark: str, scale: float, fmt: str, threads: str, workdir: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--benchmark", choices=["tpch", "ssb"], default="tpch")
+    parser.add_argument("--benchmark", choices=["tpch", "tpcds", "ssb"], default="tpch")
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--scales", type=float, nargs="+", default=[1.0, 10.0])
     parser.add_argument("--formats", nargs="+", default=["tbl", "parquet"])

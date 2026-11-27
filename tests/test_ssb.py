@@ -76,3 +76,15 @@ def test_unseeded_benchmarks_reject_a_seed(tmp_path):
         benchbox_datagen.write_tables("tpch", 0.01, tmp_path, format="tbl", seed=1)
     with pytest.raises(ValueError, match="not seeded"):
         benchbox_datagen.generate_table("tpch", "nation", 1.0, seed=1)
+
+
+@pytest.mark.parametrize("seed", [-1, 2**64, -(2**70)])
+def test_out_of_range_seeds_raise_value_error(tmp_path, seed):
+    with pytest.raises(ValueError, match="seed must be between"):
+        benchbox_datagen.write_tables("ssb", 0.01, tmp_path, format="tbl", seed=seed)
+    with pytest.raises(ValueError, match="seed must be between"):
+        benchbox_datagen.generate_table("ssb", "part", 0.01, seed=seed)
+
+
+def test_the_largest_seed_is_accepted(tmp_path):
+    benchbox_datagen.write_tables("ssb", 0.01, tmp_path, format="tbl", seed=2**64 - 1)

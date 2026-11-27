@@ -21,6 +21,8 @@ pyo3-arrow = "0.21"
 rand_chacha = "=0.10.0"
 sha2 = "0.11"
 thiserror = "2"
+tpcdsgen = "=4.0.0"
+tpcdsgen-arrow = { version = "=4.0.0", default-features = false, features = ["arrow_60"] }
 tpchgen = "=4.0.0"
 tpchgen-arrow = { version = "=4.0.0", default-features = false, features = ["arrow_60"] }
 

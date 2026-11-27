@@ -25,8 +25,10 @@ RANK_SIGMAS = 5.0
 EXCLUDED_ALWAYS = {
     ("lineorder", "lo_orderkey"): "order structure is 1-7 lines per order (legacy: geometric)",
     ("lineorder", "lo_linenumber"): "order structure is 1-7 lines per order (legacy: geometric)",
-    ("lineorder", "lo_orderdate"): "domain is the date table: 2,556 days (legacy 2,557)",
-    ("lineorder", "lo_commitdate"): "domain is the date table plus up to 121 days: starts from 2,556 days (legacy 2,557)",
+}
+EXCLUDED_METRICS = {
+    ("lineorder", "lo_orderdate"): ({"distinct_ratio"}, "the date table has 2,556 days (legacy 2,557)"),
+    ("lineorder", "lo_commitdate"): ({"distinct_ratio"}, "the date table has 2,556 days (legacy 2,557)"),
 }
 EXCLUDED_WHEN_PART_ROWS_DIFFER = {("part", "p_partkey"), ("part", "p_name"), ("lineorder", "lo_partkey")}
 DATE_DIGEST_SQL = (
@@ -268,6 +270,19 @@ def compare_stats(legacy: dict, library_run: dict) -> list[dict]:
             legacy_entries = [run["tables"][table]["columns"][name] for run in legacy["runs"]]
             for metric in METRICS:
                 legacy_values = [e[metric] for e in legacy_entries]
+                metrics_excluded, reason = EXCLUDED_METRICS.get((table, name), (set(), ""))
+                if metric in metrics_excluded:
+                    findings.append(
+                        {
+                            "table": table,
+                            "column": name,
+                            "metric": metric,
+                            "new": entry[metric],
+                            "legacy": reason,
+                            "verdict": "excluded",
+                        }
+                    )
+                    continue
                 verdict = judge(entry[metric], legacy_values)
                 if verdict == "FAIL" and metric in QUANTILE_METRICS and "cdf" in entry:
                     if rank_ok(QUANTILE_METRICS[metric], legacy_values, entry["cdf"], library_run["tables"][table]["rows"]):

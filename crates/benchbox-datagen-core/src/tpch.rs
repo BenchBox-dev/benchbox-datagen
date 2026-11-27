@@ -11,7 +11,7 @@ use tpchgen_arrow::{
     SupplierArrow,
 };
 
-use crate::{BatchReader, KeyRange};
+use crate::BatchReader;
 
 const FLUSH_BYTES: usize = 1 << 20;
 const SUPPLIERS_PER_PART: u64 = 4;
@@ -144,41 +144,4 @@ pub(crate) fn chunk_driver_rows(table: &str, scale_factor: f64) -> (u64, u64) {
         ),
         other => (row_count(other, scale_factor), 100_000),
     }
-}
-
-fn order_key(index: i64) -> i64 {
-    ((index - 1) / 8) * 32 + (index - 1) % 8 + 1
-}
-
-pub(crate) fn key_ranges(scale_factor: f64) -> Vec<KeyRange> {
-    let rows = |table| row_count(table, scale_factor) as i64;
-    let (parts, suppliers, customers, orders) = (
-        rows("part"),
-        rows("supplier"),
-        rows("customer"),
-        rows("orders"),
-    );
-    let last_order = order_key(orders);
-    let key = |table, column, min, max| KeyRange {
-        table,
-        column,
-        min,
-        max,
-    };
-    vec![
-        key("nation", "n_nationkey", 0, 24),
-        key("nation", "n_regionkey", 0, 4),
-        key("region", "r_regionkey", 0, 4),
-        key("part", "p_partkey", 1, parts),
-        key("supplier", "s_suppkey", 1, suppliers),
-        key("supplier", "s_nationkey", 0, 24),
-        key("partsupp", "ps_partkey", 1, parts),
-        key("partsupp", "ps_suppkey", 1, suppliers),
-        key("customer", "c_custkey", 1, customers),
-        key("customer", "c_nationkey", 0, 24),
-        key("orders", "o_orderkey", 1, last_order),
-        key("lineitem", "l_orderkey", 1, last_order),
-        key("lineitem", "l_partkey", 1, parts),
-        key("lineitem", "l_suppkey", 1, suppliers),
-    ]
 }

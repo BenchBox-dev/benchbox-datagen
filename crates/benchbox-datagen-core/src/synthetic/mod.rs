@@ -3,7 +3,10 @@ pub(crate) mod delimited;
 pub(crate) mod rng;
 mod ssb;
 
+use std::fmt;
+use std::io::{self, Write};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
@@ -11,18 +14,18 @@ use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
 use crate::{Benchmark, schema};
 
-pub(crate) use ssb::key_ranges as ssb_key_ranges;
+pub(crate) use ssb::date_key_bounds as ssb_date_key_bounds;
 
 pub(crate) const BLOCK_ROWS: u64 = 65_536;
 pub(crate) const DEFAULT_SEED: u64 = 42;
 
-pub(crate) trait Table: Send + Sync {
+pub(crate) trait Table: Send + Sync + fmt::Debug {
     fn schema(&self) -> SchemaRef;
     fn rows(&self) -> u64;
     fn block(&self, index: u64) -> RecordBatch;
 
-    fn blocks(&self) -> u64 {
-        self.rows().div_ceil(BLOCK_ROWS)
+    fn warm(&self, _block: u64, _cancel: &AtomicBool) -> bool {
+        true
     }
 }
 
@@ -33,7 +36,7 @@ pub(crate) fn block_len(rows: u64, block: u64) -> usize {
 pub(crate) fn row_count(benchmark: Benchmark, table: &str, scale_factor: f64) -> u64 {
     match benchmark {
         Benchmark::Ssb => ssb::row_count(table, scale_factor),
-        Benchmark::Tpch => unreachable!("TPC-H is not a synthetic benchmark"),
+        Benchmark::Tpch | Benchmark::Tpcds => unreachable!("only SSB is a synthetic benchmark"),
     }
 }
 
@@ -45,8 +48,12 @@ pub(crate) fn open(
 ) -> Arc<dyn Table> {
     match benchmark {
         Benchmark::Ssb => ssb::open(table, scale_factor, seed),
-        Benchmark::Tpch => unreachable!("TPC-H is not a synthetic benchmark"),
+        Benchmark::Tpch | Benchmark::Tpcds => unreachable!("only SSB is a synthetic benchmark"),
     }
+}
+
+pub(crate) fn splittable(table: &str) -> bool {
+    table != "date"
 }
 
 pub(crate) fn part_rows(rows: u64, part: i32, parts: i32) -> (u64, u64) {
@@ -61,9 +68,12 @@ pub(crate) struct Part {
 }
 
 impl Part {
-    pub(crate) fn new(table: Arc<dyn Table>, part: i32, parts: i32) -> Self {
-        let (next, end) = part_rows(table.rows(), part, parts);
-        Self { table, next, end }
+    pub(crate) fn new(table: Arc<dyn Table>, start: u64, end: u64) -> Self {
+        Self {
+            end: end.min(table.rows()),
+            table,
+            next: start,
+        }
     }
 }
 
@@ -76,7 +86,7 @@ impl Iterator for Part {
         }
         let block = self.next / BLOCK_ROWS;
         let start = block * BLOCK_ROWS;
-        let stop = (start + BLOCK_ROWS).min(self.end).min(self.table.rows());
+        let stop = (start + BLOCK_ROWS).min(self.end);
         let batch = self.table.block(block);
         let slice = batch.slice((self.next - start) as usize, (stop - self.next) as usize);
         self.next = stop;
@@ -90,21 +100,10 @@ pub(crate) struct Reader {
 }
 
 impl Reader {
-    pub(crate) fn empty(table: Arc<dyn Table>) -> Self {
+    pub(crate) fn new(table: Arc<dyn Table>, start: u64, end: u64) -> Self {
         Self {
             schema: table.schema(),
-            part: Part {
-                table,
-                next: 0,
-                end: 0,
-            },
-        }
-    }
-
-    pub(crate) fn new(table: Arc<dyn Table>, part: i32, parts: i32) -> Self {
-        Self {
-            schema: table.schema(),
-            part: Part::new(table, part, parts),
+            part: Part::new(table, start, end),
         }
     }
 }
@@ -121,6 +120,22 @@ impl RecordBatchReader for Reader {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
+}
+
+pub(crate) fn write_delimited<W: Write>(
+    table: &Arc<dyn Table>,
+    start: u64,
+    end: u64,
+    sink: &mut W,
+) -> io::Result<u64> {
+    let (mut rows, mut bytes) = (0, Vec::new());
+    for batch in Part::new(table.clone(), start, end) {
+        bytes.clear();
+        delimited::encode(&batch, &mut bytes);
+        rows += batch.num_rows() as u64;
+        sink.write_all(&bytes)?;
+    }
+    Ok(rows)
 }
 
 pub(crate) fn ssb_schema(table: &str) -> SchemaRef {

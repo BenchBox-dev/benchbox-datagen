@@ -1,11 +1,16 @@
+mod generate;
 mod output;
 mod pipeline;
 mod schema;
 mod synthetic;
+mod tpcds;
 mod tpch;
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
+use std::thread;
 
 use arrow::compute::cast;
 use arrow::datatypes::SchemaRef;
@@ -13,6 +18,7 @@ use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
 pub use benchbox_datagen_writers::Compression;
+pub use generate::KeyRange;
 pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
 
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
@@ -43,6 +49,12 @@ pub enum Error {
     Encode(String),
     #[error("{0} output is not seeded; omit the seed argument")]
     SeedNotSupported(Benchmark),
+    #[error("{benchmark} requires scale factor >= {minimum}, got {scale_factor}")]
+    ScaleFactorBelowMinimum {
+        benchmark: Benchmark,
+        minimum: f64,
+        scale_factor: f64,
+    },
     #[error("generation was cancelled")]
     Cancelled,
 }
@@ -51,28 +63,23 @@ pub enum Error {
 #[non_exhaustive]
 pub enum Benchmark {
     Tpch,
+    Tpcds,
     Ssb,
 }
 
 impl Benchmark {
-    pub const ALL: [Benchmark; 2] = [Benchmark::Tpch, Benchmark::Ssb];
+    pub const ALL: [Benchmark; 3] = [Benchmark::Tpch, Benchmark::Tpcds, Benchmark::Ssb];
 
     pub fn name(self) -> &'static str {
         match self {
             Benchmark::Tpch => "tpch",
+            Benchmark::Tpcds => "tpcds",
             Benchmark::Ssb => "ssb",
         }
     }
 
     pub fn is_seeded(self) -> bool {
         matches!(self, Benchmark::Ssb)
-    }
-
-    pub(crate) fn is_unsplit(self, table: &str) -> bool {
-        matches!(
-            (self, table),
-            (Benchmark::Tpch, "nation" | "region") | (Benchmark::Ssb, "date")
-        )
     }
 
     pub(crate) fn resolve_seed(self, seed: Option<u64>) -> Result<u64, Error> {
@@ -100,6 +107,7 @@ impl Benchmark {
                 "nation", "region", "part", "supplier", "partsupp", "customer", "orders",
                 "lineitem",
             ],
+            Benchmark::Tpcds => &tpcds::TABLES,
             Benchmark::Ssb => &["date", "customer", "supplier", "part", "lineorder"],
         }
     }
@@ -132,55 +140,47 @@ pub struct TableRequest {
     pub seed: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyRange {
-    pub table: &'static str,
-    pub column: &'static str,
-    pub min: i64,
-    pub max: i64,
-}
-
-pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
-    validate_scale_factor(scale_factor)?;
-    Ok(match benchmark {
-        Benchmark::Tpch => tpch::key_ranges(scale_factor),
-        Benchmark::Ssb => synthetic::ssb_key_ranges(scale_factor),
-    })
-}
-
 pub fn table_schema(benchmark: Benchmark, table: &str) -> Result<SchemaRef, Error> {
-    let table = benchmark.table(table)?;
-    match benchmark {
-        Benchmark::Tpch => Ok(schema::tpch(table).expect("every TPC-H table has a schema")),
-        Benchmark::Ssb => Ok(synthetic::ssb_schema(table)),
-    }
+    Ok(generate::schema(benchmark, benchmark.table(table)?))
 }
 
 pub fn row_counts(
     benchmark: Benchmark,
     scale_factor: f64,
 ) -> Result<Vec<(&'static str, u64)>, Error> {
-    validate_scale_factor(scale_factor)?;
-    match benchmark {
-        Benchmark::Tpch => Ok(benchmark
-            .tables()
-            .iter()
-            .map(|table| (*table, tpch::row_count(table, scale_factor)))
-            .collect()),
-        Benchmark::Ssb => Ok(benchmark
-            .tables()
-            .iter()
-            .map(|table| (*table, synthetic::row_count(benchmark, table, scale_factor)))
-            .collect()),
-    }
+    row_counts_cancellable(benchmark, scale_factor, None, &AtomicBool::new(false))
 }
 
-pub(crate) fn validate_scale_factor(scale_factor: f64) -> Result<(), Error> {
-    if scale_factor.is_finite() && scale_factor > 0.0 {
-        Ok(())
-    } else {
-        Err(Error::InvalidScaleFactor(scale_factor))
+pub fn row_counts_cancellable(
+    benchmark: Benchmark,
+    scale_factor: f64,
+    threads: Option<NonZeroUsize>,
+    cancel: &AtomicBool,
+) -> Result<Vec<(&'static str, u64)>, Error> {
+    validate_scale_factor(benchmark, scale_factor)?;
+    let workers = threads
+        .or_else(|| thread::available_parallelism().ok())
+        .map_or(1, NonZeroUsize::get);
+    generate::row_counts(benchmark, scale_factor, workers, cancel)
+}
+
+pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
+    validate_scale_factor(benchmark, scale_factor)?;
+    Ok(generate::key_ranges(benchmark, scale_factor))
+}
+
+pub(crate) fn validate_scale_factor(benchmark: Benchmark, scale_factor: f64) -> Result<(), Error> {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return Err(Error::InvalidScaleFactor(scale_factor));
     }
+    if benchmark == Benchmark::Tpcds && scale_factor < tpcds::MIN_SCALE_FACTOR {
+        return Err(Error::ScaleFactorBelowMinimum {
+            benchmark,
+            minimum: tpcds::MIN_SCALE_FACTOR,
+            scale_factor,
+        });
+    }
+    Ok(())
 }
 
 pub(crate) struct Conformed {
@@ -224,10 +224,15 @@ impl RecordBatchReader for Conformed {
     }
 }
 
-pub(crate) fn conformed(table: &str, scale_factor: f64, part: i32, parts: i32) -> Conformed {
+pub(crate) fn conformed(
+    benchmark: Benchmark,
+    table: &str,
+    scale_factor: f64,
+    slice: &generate::Slice,
+) -> Conformed {
     Conformed {
-        inner: tpch::batches(table, scale_factor, part, parts),
-        schema: schema::tpch(table).expect("every TPC-H table has a schema"),
+        inner: generate::batches(benchmark, table, scale_factor, slice),
+        schema: generate::schema(benchmark, table),
     }
 }
 
@@ -240,7 +245,7 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         parts,
         seed,
     } = request;
-    validate_scale_factor(*scale_factor)?;
+    validate_scale_factor(*benchmark, *scale_factor)?;
     if *parts < 1 || *part < 1 || part > parts {
         return Err(Error::InvalidPart {
             part: *part,
@@ -249,22 +254,13 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
     }
     let table = benchmark.table(table)?;
     let seed = benchmark.resolve_seed(*seed)?;
-    match benchmark {
-        Benchmark::Tpch => Ok(Box::new(conformed(table, *scale_factor, *part, *parts))),
-        Benchmark::Ssb if benchmark.is_unsplit(table) => {
-            let source = synthetic::open(*benchmark, table, *scale_factor, seed);
-            Ok(Box::new(if *part > 1 {
-                synthetic::Reader::empty(source)
-            } else {
-                synthetic::Reader::new(source, 1, 1)
-            }))
-        }
-        Benchmark::Ssb => Ok(Box::new(synthetic::Reader::new(
-            synthetic::open(*benchmark, table, *scale_factor, seed),
-            *part,
-            *parts,
-        ))),
-    }
+    let slice = generate::part_slice(*benchmark, table, *scale_factor, *part, *parts, seed);
+    Ok(Box::new(conformed(
+        *benchmark,
+        table,
+        *scale_factor,
+        &slice,
+    )))
 }
 
 #[cfg(test)]
@@ -421,5 +417,153 @@ mod tests {
             row_counts(Benchmark::Tpch, -1.0),
             Err(Error::InvalidScaleFactor(-1.0))
         );
+    }
+
+    #[test]
+    fn tpcds_schemas_use_benchbox_types_and_cover_every_stream() {
+        assert_eq!(Benchmark::Tpcds.tables().len(), 24);
+        for table in Benchmark::Tpcds.tables() {
+            let schema = table_schema(Benchmark::Tpcds, table).unwrap();
+            let mut batches = record_batches(&TableRequest {
+                benchmark: Benchmark::Tpcds,
+                table: (*table).to_owned(),
+                scale_factor: 1.0,
+                part: 1,
+                parts: 1,
+                seed: None,
+            })
+            .unwrap();
+            assert_eq!(batches.schema(), schema, "{table}");
+            let batch = batches.next().unwrap().unwrap();
+            assert_eq!(batch.schema(), schema, "{table}");
+            for field in schema.fields() {
+                assert!(
+                    !matches!(
+                        field.data_type(),
+                        DataType::Int32 | DataType::Utf8View | DataType::LargeUtf8
+                    ),
+                    "{table}.{}",
+                    field.name()
+                );
+            }
+        }
+        assert!(matches!(
+            table_schema(Benchmark::Tpcds, "dbgen_version"),
+            Err(Error::UnknownTable { .. })
+        ));
+    }
+
+    #[test]
+    fn tpcds_upstream_field_names_equal_the_target_names() {
+        for table in Benchmark::Tpcds.tables() {
+            let upstream =
+                generate::batches(Benchmark::Tpcds, table, 1.0, &generate::Slice::Tpcds(1..=1))
+                    .schema();
+            let names: Vec<_> = upstream
+                .fields()
+                .iter()
+                .map(|field| field.name().replace("s_tax_precentage", "s_tax_percentage"))
+                .collect();
+            let target: Vec<_> = generate::schema(Benchmark::Tpcds, table)
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect();
+            assert_eq!(names, target, "{table}");
+        }
+    }
+
+    #[test]
+    fn tpcds_row_counts_stop_when_cancelled() {
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            row_counts_cancellable(Benchmark::Tpcds, 1.0, NonZeroUsize::new(2), &cancelled),
+            Err(Error::Cancelled)
+        );
+    }
+
+    #[test]
+    fn tpcds_rejects_fractional_scale_factors() {
+        for scale_factor in [0.5, 0.01, 0.999] {
+            assert_eq!(
+                row_counts(Benchmark::Tpcds, scale_factor),
+                Err(Error::ScaleFactorBelowMinimum {
+                    benchmark: Benchmark::Tpcds,
+                    minimum: 1.0,
+                    scale_factor,
+                })
+            );
+            assert!(matches!(
+                key_ranges(Benchmark::Tpcds, scale_factor),
+                Err(Error::ScaleFactorBelowMinimum { .. })
+            ));
+            assert!(matches!(
+                record_batches(&TableRequest {
+                    benchmark: Benchmark::Tpcds,
+                    table: "item".into(),
+                    scale_factor,
+                    part: 1,
+                    parts: 1,
+                    seed: None,
+                }),
+                Err(Error::ScaleFactorBelowMinimum { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn tpcds_row_counts_match_the_published_scale_factor_one_cardinalities() {
+        let counts: std::collections::HashMap<_, _> = row_counts(Benchmark::Tpcds, 1.0)
+            .unwrap()
+            .into_iter()
+            .collect();
+        for (table, rows) in [
+            ("call_center", 6),
+            ("catalog_page", 11_718),
+            ("catalog_returns", 144_067),
+            ("catalog_sales", 1_441_548),
+            ("customer", 100_000),
+            ("customer_address", 50_000),
+            ("customer_demographics", 1_920_800),
+            ("date_dim", 73_049),
+            ("household_demographics", 7_200),
+            ("income_band", 20),
+            ("inventory", 11_745_000),
+            ("item", 18_000),
+            ("promotion", 300),
+            ("reason", 75),
+            ("ship_mode", 20),
+            ("store", 12),
+            ("store_returns", 287_514),
+            ("store_sales", 2_880_404),
+            ("time_dim", 86_400),
+            ("warehouse", 5),
+            ("web_page", 60),
+            ("web_returns", 71_763),
+            ("web_sales", 719_384),
+            ("web_site", 30),
+        ] {
+            assert_eq!(counts[table], rows, "{table}");
+        }
+    }
+
+    #[test]
+    fn key_ranges_cover_dimension_keys_and_order_numbers() {
+        let ranges = key_ranges(Benchmark::Tpcds, 1.0).unwrap();
+        let find = |table: &str, column: &str| {
+            *ranges
+                .iter()
+                .find(|range| range.table == table && range.column == column)
+                .unwrap()
+        };
+        assert_eq!(find("item", "i_item_sk").max, 18_000);
+        assert_eq!(find("time_dim", "t_time_sk").min, 0);
+        assert_eq!(find("date_dim", "d_date_sk").min, 2_415_022);
+        let tpch = key_ranges(Benchmark::Tpch, 1.0).unwrap();
+        let orders = tpch
+            .iter()
+            .find(|range| range.column == "o_orderkey")
+            .unwrap();
+        assert_eq!((orders.min, orders.max), (1, 6_000_000));
     }
 }

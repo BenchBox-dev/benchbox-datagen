@@ -1,5 +1,6 @@
 use std::fmt::Write;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{ArrayRef, Int64Array, StringBuilder};
 use arrow::datatypes::SchemaRef;
@@ -10,7 +11,6 @@ use super::calendar::{
 };
 use super::rng::{Draw, Stream};
 use super::{BLOCK_ROWS, Table, block_len, ssb_schema};
-use crate::KeyRange;
 
 const BENCHMARK: &str = "ssb";
 const CUSTOMERS_PER_SCALE: u64 = 30_000;
@@ -137,31 +137,9 @@ pub(super) fn open(table: &str, scale_factor: f64, seed: u64) -> Arc<dyn Table> 
     }
 }
 
-pub(crate) fn key_ranges(scale_factor: f64) -> Vec<KeyRange> {
-    let first = date_key(days_from_civil(FIRST_DATE.0, FIRST_DATE.1, FIRST_DATE.2));
-    let last =
-        date_key(days_from_civil(FIRST_DATE.0, FIRST_DATE.1, FIRST_DATE.2) + DATE_ROWS as i64 - 1);
-    let (customers, suppliers, parts) = (
-        row_count("customer", scale_factor) as i64,
-        row_count("supplier", scale_factor) as i64,
-        row_count("part", scale_factor) as i64,
-    );
-    let key = |table, column, min, max| KeyRange {
-        table,
-        column,
-        min,
-        max,
-    };
-    vec![
-        key("customer", "c_custkey", 1, customers),
-        key("date", "d_datekey", first, last),
-        key("lineorder", "lo_custkey", 1, customers),
-        key("lineorder", "lo_orderdate", first, last),
-        key("lineorder", "lo_partkey", 1, parts),
-        key("lineorder", "lo_suppkey", 1, suppliers),
-        key("part", "p_partkey", 1, parts),
-        key("supplier", "s_suppkey", 1, suppliers),
-    ]
+pub(crate) fn date_key_bounds() -> (i64, i64) {
+    let first = first_day();
+    (date_key(first), date_key(first + DATE_ROWS as i64 - 1))
 }
 
 fn int(values: Vec<i64>) -> ArrayRef {
@@ -180,6 +158,7 @@ fn first_day() -> i64 {
     days_from_civil(FIRST_DATE.0, FIRST_DATE.1, FIRST_DATE.2)
 }
 
+#[derive(Debug)]
 struct DateTable;
 
 impl Table for DateTable {
@@ -276,6 +255,7 @@ impl Table for DateTable {
     }
 }
 
+#[derive(Debug)]
 struct Geography {
     table: &'static str,
     prefix: &'static str,
@@ -384,6 +364,7 @@ impl Table for Geography {
     }
 }
 
+#[derive(Debug)]
 struct Part {
     rows: u64,
     seed: u64,
@@ -455,7 +436,7 @@ fn sparse_order_key(order: i64) -> i64 {
     ((order >> 3) << 5) + (order & 7)
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Cursor {
     key: i64,
     line: i64,
@@ -464,16 +445,25 @@ struct Cursor {
 
 impl Cursor {
     fn step(&mut self, orders: &mut Draw) {
-        if self.remaining == 0 {
-            self.key += 1;
-            self.line = 0;
-            self.remaining = orders.range(1, MAX_LINES_PER_ORDER);
+        self.advance(orders, 1);
+    }
+
+    fn advance(&mut self, orders: &mut Draw, mut rows: i64) {
+        while rows > 0 {
+            if self.remaining == 0 {
+                self.key += 1;
+                self.line = 0;
+                self.remaining = orders.range(1, MAX_LINES_PER_ORDER);
+            }
+            let taken = self.remaining.min(rows);
+            self.line += taken;
+            self.remaining -= taken;
+            rows -= taken;
         }
-        self.line += 1;
-        self.remaining -= 1;
     }
 }
 
+#[derive(Debug)]
 struct Lineorder {
     rows: u64,
     customers: u64,
@@ -482,7 +472,7 @@ struct Lineorder {
     fields: Stream,
     orders: Stream,
     date_keys: Vec<i64>,
-    starts: OnceLock<Vec<Cursor>>,
+    starts: Mutex<Vec<Cursor>>,
 }
 
 impl Lineorder {
@@ -498,23 +488,25 @@ impl Lineorder {
             date_keys: (0..DATE_ROWS as i64 + MAX_COMMIT_DAYS)
                 .map(|offset| date_key(first + offset))
                 .collect(),
-            starts: OnceLock::new(),
+            starts: Mutex::new(vec![Cursor::default()]),
         }
     }
 
-    fn starts(&self) -> &[Cursor] {
-        self.starts.get_or_init(|| {
-            let mut starts = Vec::with_capacity(self.blocks() as usize);
-            let mut cursor = Cursor::default();
-            for block in 0..self.blocks() {
-                starts.push(cursor);
-                let mut orders = self.orders.block(block);
-                for _ in 0..block_len(self.rows, block) {
-                    cursor.step(&mut orders);
-                }
+    fn start(&self, index: u64, cancel: &AtomicBool) -> Option<Cursor> {
+        let mut starts = self.starts.lock().unwrap_or_else(|e| e.into_inner());
+        while starts.len() as u64 <= index {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
             }
-            starts
-        })
+            let block = starts.len() as u64 - 1;
+            let mut cursor = starts[block as usize];
+            cursor.advance(
+                &mut self.orders.block(block),
+                block_len(self.rows, block) as i64,
+            );
+            starts.push(cursor);
+        }
+        Some(starts[index as usize])
     }
 }
 
@@ -527,9 +519,15 @@ impl Table for Lineorder {
         self.rows
     }
 
+    fn warm(&self, block: u64, cancel: &AtomicBool) -> bool {
+        self.start(block, cancel).is_some()
+    }
+
     fn block(&self, index: u64) -> RecordBatch {
         let rows = block_len(self.rows, index);
-        let mut cursor = self.starts()[index as usize];
+        let mut cursor = self
+            .start(index, &AtomicBool::new(false))
+            .expect("an unset cancel flag never cancels");
         let mut flags = self.orders.block(index);
         let mut draw = self.fields.block(index);
         let mut ints: [Vec<i64>; 15] = std::array::from_fn(|_| Vec::with_capacity(rows));
@@ -616,5 +614,45 @@ impl Table for Lineorder {
                 text(ship_modes),
             ],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advancing_by_orders_equals_stepping_by_rows() {
+        let stream = Stream::new(BENCHMARK, "lineorder", "orders", 42);
+        for rows in [1, 6, 7, 100, 65_536] {
+            let (mut stepped, mut advanced) = (Cursor::default(), Cursor::default());
+            let (mut a, mut b) = (stream.block(0), stream.block(0));
+            for _ in 0..rows {
+                stepped.step(&mut a);
+            }
+            advanced.advance(&mut b, rows);
+            assert_eq!(
+                (stepped.key, stepped.line, stepped.remaining),
+                (advanced.key, advanced.line, advanced.remaining)
+            );
+        }
+    }
+
+    #[test]
+    fn starts_are_built_only_up_to_the_requested_block_and_can_be_cancelled() {
+        let table = Lineorder::new(0.5, 42);
+        let never = AtomicBool::new(false);
+        let third = table.start(3, &never).unwrap();
+        assert_eq!(table.starts.lock().unwrap().len(), 4);
+        assert_eq!(
+            table.start(1, &never).unwrap().key,
+            table.start(1, &never).unwrap().key
+        );
+        assert!(third.key > 0);
+        let cancelled = AtomicBool::new(true);
+        assert!(table.start(5, &cancelled).is_none());
+        assert!(!table.warm(5, &cancelled));
+        assert!(table.warm(2, &cancelled));
+        assert_eq!(table.starts.lock().unwrap().len(), 4);
     }
 }
