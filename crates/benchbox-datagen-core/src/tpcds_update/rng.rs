@@ -36,8 +36,7 @@ impl Rng {
     }
 
     pub(super) fn row_stop(&mut self, span: Span) {
-        for number in span.first..=span.last {
-            let stream = &mut self.streams[number];
+        for stream in &mut self.streams[span.first..=span.last] {
             while stream.get_seeds_used() < stream.get_seeds_per_row() {
                 stream.next_random();
             }
