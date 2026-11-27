@@ -12,6 +12,7 @@ arrow.workspace = true
 parquet.workspace = true
 benchbox-datagen-writers.workspace = true
 itoa.workspace = true
+libm.workspace = true
 rand_chacha.workspace = true
 tpcdsgen.workspace = true
 tpcdsgen-arrow.workspace = true

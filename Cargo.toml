@@ -14,6 +14,7 @@ arrow = { version = "60", default-features = false }
 benchbox-datagen-core = { path = "crates/benchbox-datagen-core" }
 benchbox-datagen-writers = { path = "crates/benchbox-datagen-writers" }
 itoa = "1"
+libm = "=0.2.16"
 parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "flate2-zlib-rs"] }
 tempfile = "3"
 pyo3 = { version = "0.30", features = ["abi3-py311"] }
