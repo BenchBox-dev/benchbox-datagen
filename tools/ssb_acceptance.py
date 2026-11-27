@@ -22,6 +22,15 @@ T_99_9_FOUR_DF = 8.610
 QUANTILE_METRICS = {"p1": 0.01, "p25": 0.25, "p50": 0.5, "p75": 0.75, "p99": 0.99}
 CDF_MAX_DISTINCT = 5000
 RANK_SIGMAS = 5.0
+EXCLUDED_ALWAYS = {
+    ("lineorder", "lo_orderkey"): "order structure is 1-7 lines per order (legacy: geometric)",
+    ("lineorder", "lo_linenumber"): "order structure is 1-7 lines per order (legacy: geometric)",
+}
+EXCLUDED_WHEN_PART_ROWS_DIFFER = {("part", "p_partkey"), ("part", "p_name"), ("lineorder", "lo_partkey")}
+DATE_DIGEST_SQL = (
+    "SELECT md5(string_agg(CAST(t AS VARCHAR), ',' ORDER BY d_datekey)) "
+    "FROM (SELECT * FROM {source} WHERE d_datekey <= 19981230) t"
+)
 FOREIGN_KEYS = [
     ("lineorder", "lo_custkey", "customer", "c_custkey"),
     ("lineorder", "lo_partkey", "part", "p_partkey"),
@@ -41,11 +50,12 @@ def expected_rows(scale_factor: float) -> dict[str, int]:
     def scaled(base: int) -> int:
         return max(1, int(base * scale_factor))
 
+    part = scaled(200_000) if scale_factor < 1 else 200_000 * (1 + math.floor(math.log2(scale_factor)))
     return {
-        "date": 2557,
+        "date": 2556,
         "customer": scaled(30_000),
         "supplier": scaled(2_000),
-        "part": scaled(200_000),
+        "part": part,
         "lineorder": scaled(6_000_000),
     }
 
@@ -123,7 +133,15 @@ def run_legacy(scale_factor: float, seed: int, workdir: Path) -> dict:
         generator.generate_data()
         seconds = time.monotonic() - started
         stats = table_stats(duckdb.connect(config={"threads": 4, "memory_limit": "2GB"}), tbl_sources(out))
-        return {"seed": seed, "generate_seconds": seconds, "tables": stats, "query_rows": query_row_counts(tbl_sources(out))}
+        sources = tbl_sources(out)
+        digest = duckdb.connect().execute(DATE_DIGEST_SQL.format(source=sources["date"])).fetchone()[0]
+        return {
+            "seed": seed,
+            "generate_seconds": seconds,
+            "tables": stats,
+            "date_digest": digest,
+            "query_rows": query_row_counts(sources),
+        }
     finally:
         shutil.rmtree(out, ignore_errors=True)
 
@@ -166,6 +184,9 @@ def cmd_library(args: argparse.Namespace) -> None:
                 {
                     "seed": seed,
                     "tables": table_stats(duckdb.connect(), parquet_sources(out)),
+                    "date_digest": duckdb.connect()
+                    .execute(DATE_DIGEST_SQL.format(source=parquet_sources(out)["date"]))
+                    .fetchone()[0],
                     "query_rows": query_row_counts(parquet_sources(out)),
                 }
             )
@@ -204,10 +225,44 @@ def rank_ok(q: float, legacy_values: list[float], cdf: list[list[float]], rows: 
     return False
 
 
+def excluded_columns(legacy: dict, library_run: dict) -> dict[tuple[str, str], str]:
+    excluded = dict(EXCLUDED_ALWAYS)
+    for name in library_run["tables"]["date"]["columns"]:
+        excluded[("date", name)] = "date has 2,556 rows (legacy 2,557); compared by digest of the shared rows"
+    if any(run["tables"]["part"]["rows"] != library_run["tables"]["part"]["rows"] for run in legacy["runs"]):
+        for key in EXCLUDED_WHEN_PART_ROWS_DIFFER:
+            excluded[key] = "part row count follows 200,000 x floor(1 + log2 SF)"
+    return excluded
+
+
 def compare_stats(legacy: dict, library_run: dict) -> list[dict]:
     findings = []
+    excluded = excluded_columns(legacy, library_run)
+    digests = {run["date_digest"] for run in legacy["runs"]}
+    findings.append(
+        {
+            "table": "date",
+            "column": "*",
+            "metric": "shared_rows_digest",
+            "new": library_run["date_digest"],
+            "legacy": sorted(digests),
+            "verdict": "ok" if digests == {library_run["date_digest"]} else "FAIL",
+        }
+    )
     for table in TABLES:
         for name, entry in library_run["tables"][table]["columns"].items():
+            if (table, name) in excluded:
+                findings.append(
+                    {
+                        "table": table,
+                        "column": name,
+                        "metric": "*",
+                        "new": None,
+                        "legacy": excluded[(table, name)],
+                        "verdict": "excluded",
+                    }
+                )
+                continue
             legacy_entries = [run["tables"][table]["columns"][name] for run in legacy["runs"]]
             for metric in METRICS:
                 legacy_values = [e[metric] for e in legacy_entries]
@@ -240,22 +295,44 @@ def compare_stats(legacy: dict, library_run: dict) -> list[dict]:
     return findings
 
 
+def query_rule(legacy: dict, library: dict) -> dict[str, dict]:
+    result = {}
+    for query_id in legacy["runs"][0]["query_rows"]:
+        legacy_rows = [run["query_rows"][query_id] for run in legacy["runs"]]
+        library_rows = [run["query_rows"][query_id] for run in library["runs"]]
+        legacy_empty = sum(1 for n in legacy_rows if n == 0)
+        library_empty = sum(1 for n in library_rows if n == 0)
+        result[query_id] = {
+            "legacy": legacy_rows,
+            "library": library_rows,
+            "legacy_empty": legacy_empty,
+            "library_empty": library_empty,
+            "ok": library_empty == 0 if legacy_empty == 0 else library_empty <= legacy_empty,
+        }
+    return result
+
+
 def cmd_compare(args: argparse.Namespace) -> None:
     legacy = json.loads(Path(args.legacy).read_text())
     library = json.loads(Path(args.library).read_text())
     findings_by_seed = {run["seed"]: compare_stats(legacy, run) for run in library["runs"]}
     summary = {"scale": legacy["scale"], "legacy_seeds": [r["seed"] for r in legacy["runs"]], "seeds": {}}
     for seed, findings in findings_by_seed.items():
-        counts = {"ok": 0, "pi": 0, "rank": 0, "FAIL": 0}
+        counts = {"ok": 0, "pi": 0, "rank": 0, "excluded": 0, "FAIL": 0}
         for finding in findings:
             counts[finding["verdict"]] += 1
         summary["seeds"][seed] = {"counts": counts, "details": [f for f in findings if f["verdict"] != "ok"]}
+    summary["queries"] = query_rule(legacy, library)
     for run in legacy["runs"]:
         summary.setdefault("legacy_rows", {}).update({t: run["tables"][t]["rows"] for t in TABLES})
     summary["library_rows"] = {t: library["runs"][0]["tables"][t]["rows"] for t in TABLES}
     Path(args.out).write_text(json.dumps(summary, indent=1))
     for seed, data in summary["seeds"].items():
         print(f"sf={legacy['scale']} seed={seed} {data['counts']}")
+    bad_queries = [q for q, v in summary["queries"].items() if not v["ok"]]
+    print(f"sf={legacy['scale']} queries violating the empty-result rule: {bad_queries}")
+    failed = bad_queries or any(d["counts"]["FAIL"] for d in summary["seeds"].values())
+    sys.exit(1 if failed else 0)
 
 
 def query_row_counts(sources: dict[str, str]) -> dict[str, int]:
@@ -380,17 +457,24 @@ def cmd_report(args: argparse.Namespace) -> None:
             f"| {sf_name(scale)} | {counts} | {sum(verify['orphans'].values())} | {sum(verify['duplicates'].values())} | {'yes' if agree else 'NO'} |"
         )
     lines += ["", "### Distribution comparison with 5 legacy seeds (42-46)", ""]
-    lines += ["| SF | library seed | in legacy range | in 99.9% prediction interval | rank-equivalent quantile | outside |", "|---|---|---|---|---|---|"]
+    lines += ["| SF | library seed | in legacy range | in 99.9% prediction interval | rank-equivalent quantile | excluded | outside |", "|---|---|---|---|---|---|---|"]
     details = []
-    for scale in (0.1, 1.0):
+    excluded = {}
+    for scale in (0.01, 0.1, 1.0):
         compare = load(base / f"compare_{sf_name(scale)}.json")
         if compare is None:
             continue
         for seed, data in compare["seeds"].items():
             c = data["counts"]
-            lines.append(f"| {sf_name(scale)} | {seed} | {c['ok']} | {c['pi']} | {c['rank']} | {c['FAIL']} |")
+            lines.append(f"| {sf_name(scale)} | {seed} | {c['ok']} | {c['pi']} | {c['rank']} | {c['excluded']} | {c['FAIL']} |")
         for finding in compare["seeds"]["42"]["details"]:
-            details.append((scale, finding))
+            if finding["verdict"] == "excluded":
+                excluded.setdefault((finding["table"], finding["column"]), finding["legacy"])
+            else:
+                details.append((scale, finding))
+    lines += ["", "Excluded columns (domain necessarily changes with the specification row counts; all metrics of the column):", ""]
+    lines += ["| table.column | reason |", "|---|---|"]
+    lines += [f"| {table}.{column} | {reason} |" for (table, column), reason in sorted(excluded.items())]
     lines += ["", "Metrics for library seed 42 that are not inside the legacy min-max range:", ""]
     lines += ["| SF | table.column | metric | library | legacy (5 seeds) | verdict |", "|---|---|---|---|---|---|"]
     for scale, f in details:
@@ -398,6 +482,15 @@ def cmd_report(args: argparse.Namespace) -> None:
         shown = ", ".join(f"{v:.6g}" if isinstance(v, (int, float)) else str(v) for v in legacy) if isinstance(legacy, list) else str(legacy)
         new = f"{f['new']:.6g}" if isinstance(f["new"], (int, float)) else str(f["new"])
         lines.append(f"| {sf_name(scale)} | {f['table']}.{f['column']} | {f['metric']} | {new} | {shown} | {f['verdict']} |")
+    lines += ["", "### Empty-result rule (library seeds 42-46 against legacy seeds 42-46)", ""]
+    lines += ["| SF | queries empty on some legacy seed | rule violations |", "|---|---|---|"]
+    for scale in (0.01, 0.1, 1.0):
+        compare = load(base / f"compare_{sf_name(scale)}.json")
+        if compare is None:
+            continue
+        sometimes = [f"{q} ({v['legacy_empty']} legacy / {v['library_empty']} library empty seeds)" for q, v in compare["queries"].items() if v["legacy_empty"]]
+        bad = [q for q, v in compare["queries"].items() if not v["ok"]]
+        lines.append(f"| {sf_name(scale)} | {', '.join(sometimes) or 'none'} | {', '.join(bad) or 'none'} |")
     lines += ["", "### SSB queries (BenchBox query texts, default parameters)", ""]
     for scale in scales:
         verify = load(base / f"verify_{sf_name(scale)}.json")
@@ -418,11 +511,11 @@ def cmd_report(args: argparse.Namespace) -> None:
     budgets = load(base / "budgets.json")
     if budgets:
         lines += ["### Budgets (N=3 medians, default threads)", ""]
-        lines += [f"Host CPUs {budgets['cpus']}, load average at start {budgets['loadavg_start']}.", ""]
+        lines += [f"Host CPUs {budgets['host']['cpus']}, load average at start {[round(x, 2) for x in budgets['host']['loadavg_start']]}.", ""]
         lines += ["| SF | format | wall s (runs) | median wall s | budget s | peak RSS MiB (runs) | median RSS | budget MiB | load before / after | met |", "|---|---|---|---|---|---|---|---|---|---|"]
         for r in budgets["results"]:
             lines.append(
-                f"| {sf_name(r['scale'])} | {r['format']} | {r['runs_wall_s']} | {r['median_wall_s']} | {r['budget_wall_s']} | {r['runs_rss_mib']} | {r['median_rss_mib']} | {r['budget_rss_mib']} | {[round(x, 2) for x in r['loadavg_before']]} / {[round(x, 2) for x in r['loadavg_after']]} | {'yes' if r['met'] else 'NO'} |"
+                f"| {sf_name(r['scale'])} | {r['format']} | {r['runs_wall_s']} | {r['median_wall_s']} | {r['budget_wall_s']} | {r['runs_peak_rss_mib']} | {r['median_peak_rss_mib']} | {r['budget_peak_rss_mib']} | {[round(x, 2) for x in r['loadavg_before']]} / {[round(x, 2) for x in r['loadavg_after']]} | {'yes' if r['met'] else 'NO'} |"
             )
     Path(args.out).write_text("\n".join(lines) + "\n")
     print(f"report -> {args.out}")

@@ -58,6 +58,7 @@ impl Stream {
 pub(crate) struct Draw(ChaCha8Rng);
 
 impl Draw {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn u32(&mut self) -> u32 {
         self.0.next_u32()
     }

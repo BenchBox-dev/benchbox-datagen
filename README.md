@@ -119,15 +119,36 @@ the output and is a generator version bump that refreezes the golden hashes.
 
 ### SSB
 
-Tables, columns, types, key relationships and value domains follow BenchBox's
-legacy `random.Random(42)` generator; only the random stream changed. Counts
-at scale factor `SF` are `date` 2,557 (1992-01-01 to 1998-12-31), `customer`
-`30,000 * SF`, `supplier` `2,000 * SF`, `part` `200,000 * SF` and `lineorder`
-`6,000,000 * SF`, each truncated and at least 1. Orders are runs of
-consecutive `lineorder` rows: each row after the first starts a new order with
-probability 0.7, order keys are contiguous from 2, and line numbers restart at
-1. `date` is byte-identical to the legacy `date.tbl` apart from line endings
-(the legacy writer emits CRLF).
+Tables, columns, types and value domains follow BenchBox's legacy
+`random.Random(42)` generator; only the random stream changed. Row counts follow
+the Star Schema Benchmark specification (O'Neil, O'Neil, Chen, "The Star Schema
+Benchmark", Revision 3, 2009, Figure 1.1 and sections 2.2-2.6,
+<https://www.cs.umb.edu/~poneil/StarSchemaB.PDF>) as implemented by the reference
+`ssb-dbgen` (`driver.c`, `dss.h`, `build.c`; checked against
+`eyalroz/ssb-dbgen` at `ae1e254` and `vadimtk/ssb-dbgen`):
+
+| Table | Rows at scale factor `SF` | Source |
+| :--- | :--- | :--- |
+| `date` | 2,556 (1992-01-01 to 1998-12-30), all scale factors | paper section 2.6 ("7 years of days", no count); `vadimtk/ssb-dbgen` `driver.c` and `shared.h` (`NUM_DAYS 2556`); `eyalroz/ssb-dbgen` has 2,557 |
+| `customer` | `30,000 * SF` | paper section 2.5; `driver.c` base 30000 |
+| `supplier` | `2,000 * SF` | paper section 2.4; `driver.c` base 2000 |
+| `part` | `200,000 * floor(1 + log2(SF))` for `SF >= 1` | paper section 2.3; `driver.c` `rowcnt = base * floor(1 + log(scale)/log(2))` |
+| `lineorder` | `6,000,000 * SF` | paper section 2.2 and Figure 1.1 (`ORDERS` `SF*1,500,000`, `LO_LINENUMBER` 1-7); `driver.c` order base 150,000 x 10, `O_LCNT_MIN/MAX` 1-7 |
+
+For `SF < 1` the reference scales every base count by `SF` (truncated, at least
+1), so `part` is `200,000 * SF`; the library keeps `date` at 2,556 because the
+reference's own scaling of the date base would leave foreign keys without a
+parent. For non-integer `SF >= 1` the reference truncates `SF` to an integer
+first; the library scales `customer`, `supplier` and `lineorder` linearly and
+takes `floor(log2(SF))` of the exact `SF` (computed from the float exponent, no
+libm). `lineorder` is exactly `6,000,000 * SF` rows (row counts never depend on
+the seed): orders are runs of consecutive rows, each order draws 1-7 lines
+uniformly, and the final order is cut at the row count, so the order count is
+`1,500,000 * SF` within sampling noise. Order `n` (from 1) has
+key `((n >> 3) << 5) + (n & 7)`, the reference `mk_sparse` mapping for the paper's
+"first 8 of each 32 keys populated", and line numbers restart at 1. `date` is
+byte-identical to legacy `date.tbl` for its 2,556 rows, apart from line endings
+(the legacy writer emits CRLF) and the legacy 2,557th row.
 
 `tools/ssb_acceptance.py` produces the legacy-versus-library comparison,
 foreign-key and uniqueness checks and the 13-query DuckDB/DataFusion agreement

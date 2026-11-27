@@ -19,13 +19,15 @@ def sha256(path: str) -> str:
 def test_table_names_and_row_counts():
     assert benchbox_datagen.table_names("ssb") == TABLES
     assert benchbox_datagen.row_counts("ssb", 0.01) == {
-        "date": 2_557,
+        "date": 2_556,
         "customer": 300,
         "supplier": 20,
         "part": 2_000,
         "lineorder": 60_000,
     }
     assert benchbox_datagen.row_counts("ssb", 10.0)["lineorder"] == 60_000_000
+    assert benchbox_datagen.row_counts("ssb", 10.0)["part"] == 800_000
+    assert benchbox_datagen.row_counts("ssb", 1.0)["part"] == 200_000
 
 
 def test_stream_and_parquet_schemas_equal_the_benchbox_converter_schemas(tmp_path):
@@ -43,7 +45,7 @@ def test_key_ranges_bound_every_foreign_key():
     ranges = benchbox_datagen.key_ranges("ssb", 0.01)
     assert ranges["customer"]["c_custkey"] == (1, 300)
     assert ranges["lineorder"]["lo_suppkey"] == ranges["supplier"]["s_suppkey"] == (1, 20)
-    assert ranges["lineorder"]["lo_orderdate"] == ranges["date"]["d_datekey"] == (19920101, 19981231)
+    assert ranges["lineorder"]["lo_orderdate"] == ranges["date"]["d_datekey"] == (19920101, 19981230)
     for table, rows in benchbox_datagen.row_counts("ssb", 0.01).items():
         batches = pa.RecordBatchReader.from_stream(benchbox_datagen.generate_table("ssb", table, 0.01))
         assert batches.read_all().num_rows == rows

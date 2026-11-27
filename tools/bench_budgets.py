@@ -36,6 +36,22 @@ print(json.dumps({"wall_s": wall, "peak_rss_mib": peak / (1 << 20), "rows": sum(
 """
 
 
+def measure_driver(driver: str, scale: float, fmt: str, threads: str, workdir: Path) -> dict[str, float]:
+    out = Path(tempfile.mkdtemp(prefix="bench-", dir=workdir))
+    try:
+        started = time.monotonic()
+        process = subprocess.Popen([driver, str(scale), "42", fmt, str(out), threads])
+        _, status, usage = os.wait4(process.pid, 0)
+        wall = time.monotonic() - started
+        if status != 0:
+            raise subprocess.CalledProcessError(status, driver)
+        peak = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+        size = sum(path.stat().st_size for path in out.iterdir())
+        return {"wall_s": wall, "peak_rss_mib": peak / (1 << 20), "bytes": size}
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
 def measure(benchmark: str, scale: float, fmt: str, threads: str, workdir: Path) -> dict[str, float]:
     out = Path(tempfile.mkdtemp(prefix="bench-", dir=workdir))
     try:
@@ -58,6 +74,7 @@ def main() -> int:
     parser.add_argument("--formats", nargs="+", default=["tbl", "parquet"])
     parser.add_argument("--threads", default="default")
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--driver")
     args = parser.parse_args()
     report: dict[str, object] = {
         "host": {
@@ -74,7 +91,10 @@ def main() -> int:
     for scale in args.scales:
         for fmt in args.formats:
             load_before = os.getloadavg()
-            runs = [measure(args.benchmark, scale, fmt, args.threads, Path(args.workdir)) for _ in range(args.runs)]
+            if args.driver:
+                runs = [measure_driver(args.driver, scale, fmt, args.threads, Path(args.workdir)) for _ in range(args.runs)]
+            else:
+                runs = [measure(args.benchmark, scale, fmt, args.threads, Path(args.workdir)) for _ in range(args.runs)]
             wall_budget, rss_budget = BUDGETS[(args.benchmark, scale, fmt)]
             wall = statistics.median(run["wall_s"] for run in runs)
             rss = statistics.median(run["peak_rss_mib"] for run in runs)

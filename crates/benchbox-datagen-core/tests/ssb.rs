@@ -17,7 +17,7 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "tbl",
         "0.01",
         "date",
-        "e1b716d78ec7b630bb7b3cddd26a034fcf42428de80323ca7706062f6f0a9448",
+        "1c61cb7e2ca8405acf18bbc6adba75ad89dee592f1614ad741d9e17246289d37",
     ),
     (
         "tbl",
@@ -41,13 +41,13 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "tbl",
         "0.01",
         "lineorder",
-        "6fe0193c3ff6538e8235274e014b83860205faf9dc35dc04101b5abf3e241b3b",
+        "8d28704635cc7339c10c789acd4308aacefc3214e83b09a5b0c686c055d3c5f5",
     ),
     (
         "tbl",
         "0.1",
         "date",
-        "e1b716d78ec7b630bb7b3cddd26a034fcf42428de80323ca7706062f6f0a9448",
+        "1c61cb7e2ca8405acf18bbc6adba75ad89dee592f1614ad741d9e17246289d37",
     ),
     (
         "tbl",
@@ -71,13 +71,13 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "tbl",
         "0.1",
         "lineorder",
-        "67757d3aa2359f0142323e0970fb122ca34e57832c3fb60f23f3ccc1b220ad57",
+        "7739b01ebb3283b18bb099ef91d1788e25db7539c174b74bd4e5ed55ef708257",
     ),
     (
         "parquet",
         "0.01",
         "date",
-        "daed21a9eb1b55192b3f3938589cf2545c8911463ac92934c77a159dc2e69e2d",
+        "88a730e8743697f9db657ce4727286ee2a9be60a0bb3ea9e63c254c099f0d9c9",
     ),
     (
         "parquet",
@@ -101,13 +101,13 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "parquet",
         "0.01",
         "lineorder",
-        "c5dfd5e7d0b5ef12e1b13f674e7dbe1bcf23c12f845c9a204fca16a1876b0a16",
+        "b678c19b0cf2a8aaa789e22794c41df3b948399ce19a50f6e76b4e9be409df03",
     ),
     (
         "parquet",
         "0.1",
         "date",
-        "daed21a9eb1b55192b3f3938589cf2545c8911463ac92934c77a159dc2e69e2d",
+        "88a730e8743697f9db657ce4727286ee2a9be60a0bb3ea9e63c254c099f0d9c9",
     ),
     (
         "parquet",
@@ -131,7 +131,7 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "parquet",
         "0.1",
         "lineorder",
-        "5bc961bdb87b776dc3b485b7e24c3b9260a25441ddb2f03b21728e554ce2165a",
+        "aae9bbfc33dffae55730061f047c387e412027f9b5f73ab4b7b2af7b5e1720cd",
     ),
 ];
 
@@ -209,10 +209,15 @@ fn int_column(table: &str, scale_factor: f64, column: &str) -> Vec<i64> {
 #[test]
 fn row_counts_follow_the_ssb_scale_rules_at_every_gate_scale() {
     let expected = [
-        (0.01, [2_557, 300, 20, 2_000, 60_000]),
-        (0.1, [2_557, 3_000, 200, 20_000, 600_000]),
-        (1.0, [2_557, 30_000, 2_000, 200_000, 6_000_000]),
-        (10.0, [2_557, 300_000, 20_000, 2_000_000, 60_000_000]),
+        (0.01, [2_556, 300, 20, 2_000, 60_000]),
+        (0.1, [2_556, 3_000, 200, 20_000, 600_000]),
+        (1.0, [2_556, 30_000, 2_000, 200_000, 6_000_000]),
+        (10.0, [2_556, 300_000, 20_000, 800_000, 60_000_000]),
+        (2.0, [2_556, 60_000, 4_000, 400_000, 12_000_000]),
+        (7.9, [2_556, 237_000, 15_800, 600_000, 47_400_000]),
+        (8.0, [2_556, 240_000, 16_000, 800_000, 48_000_000]),
+        (16.0, [2_556, 480_000, 32_000, 1_000_000, 96_000_000]),
+        (100.0, [2_556, 3_000_000, 200_000, 1_400_000, 600_000_000]),
     ];
     for (scale_factor, rows) in expected {
         let counts = row_counts(Benchmark::Ssb, scale_factor).unwrap();
@@ -244,7 +249,7 @@ fn generated_rows_equal_the_reported_counts_and_schemas() {
 #[test]
 fn foreign_keys_resolve_and_orders_are_well_formed() {
     let dates: HashSet<i64> = int_column("date", 0.1, "d_datekey").into_iter().collect();
-    assert_eq!(dates.len(), 2_557);
+    assert_eq!(dates.len(), 2_556);
     let ranges = key_ranges(Benchmark::Ssb, 0.1).unwrap();
     let range = |column: &str| ranges.iter().find(|r| r.column == column).unwrap();
     for (column, parent) in [
@@ -267,14 +272,26 @@ fn foreign_keys_resolve_and_orders_are_well_formed() {
     );
     let orders = int_column("lineorder", 0.1, "lo_orderkey");
     let lines = int_column("lineorder", 0.1, "lo_linenumber");
-    assert_eq!((orders[0], lines[0]), (2, 1));
+    let sparse = |order: i64| ((order >> 3) << 5) + (order & 7);
+    assert_eq!((orders[0], lines[0]), (1, 1));
+    let (mut order_index, mut order_lines, mut longest) = (1, 1, 1);
     for index in 1..orders.len() {
         if orders[index] == orders[index - 1] {
             assert_eq!(lines[index], lines[index - 1] + 1);
+            order_lines += 1;
         } else {
-            assert_eq!((orders[index], lines[index]), (orders[index - 1] + 1, 1));
+            order_index += 1;
+            assert_eq!((orders[index], lines[index]), (sparse(order_index), 1));
+            order_lines = 1;
         }
+        longest = longest.max(order_lines);
     }
+    assert_eq!(longest, 7);
+    let order_count = order_index;
+    assert!(
+        (148_500..=151_500).contains(&order_count),
+        "orders {order_count}"
+    );
 }
 
 #[test]

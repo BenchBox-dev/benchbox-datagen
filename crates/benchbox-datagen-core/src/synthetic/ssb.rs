@@ -17,9 +17,9 @@ const CUSTOMERS_PER_SCALE: u64 = 30_000;
 const SUPPLIERS_PER_SCALE: u64 = 2_000;
 const PARTS_PER_SCALE: u64 = 200_000;
 const LINEORDERS_PER_SCALE: u64 = 6_000_000;
-const DATE_ROWS: u64 = 2_557;
+const DATE_ROWS: u64 = 2_556;
 const MAX_COMMIT_DAYS: i64 = 121;
-const NEW_ORDER_THRESHOLD: u32 = 3_006_477_107;
+const MAX_LINES_PER_ORDER: i64 = 7;
 const FIRST_DATE: (i64, i64, i64) = (1992, 1, 1);
 
 const NATIONS: [(&str, &str); 25] = [
@@ -111,10 +111,18 @@ pub(super) fn row_count(table: &str, scale_factor: f64) -> u64 {
         "date" => DATE_ROWS,
         "customer" => scaled(CUSTOMERS_PER_SCALE, scale_factor),
         "supplier" => scaled(SUPPLIERS_PER_SCALE, scale_factor),
-        "part" => scaled(PARTS_PER_SCALE, scale_factor),
+        "part" => part_rows(scale_factor),
         "lineorder" => scaled(LINEORDERS_PER_SCALE, scale_factor),
         other => unreachable!("table {other:?} was validated by the caller"),
     }
+}
+
+fn part_rows(scale_factor: f64) -> u64 {
+    if scale_factor < 1.0 {
+        return scaled(PARTS_PER_SCALE, scale_factor);
+    }
+    let floor_log2 = ((scale_factor.to_bits() >> 52) & 0x7ff) - 1023;
+    PARTS_PER_SCALE * (1 + floor_log2)
 }
 
 pub(super) fn open(table: &str, scale_factor: f64, seed: u64) -> Arc<dyn Table> {
@@ -443,6 +451,29 @@ impl Table for Part {
     }
 }
 
+fn sparse_order_key(order: i64) -> i64 {
+    ((order >> 3) << 5) + (order & 7)
+}
+
+#[derive(Clone, Copy, Default)]
+struct Cursor {
+    key: i64,
+    line: i64,
+    remaining: i64,
+}
+
+impl Cursor {
+    fn step(&mut self, orders: &mut Draw) {
+        if self.remaining == 0 {
+            self.key += 1;
+            self.line = 0;
+            self.remaining = orders.range(1, MAX_LINES_PER_ORDER);
+        }
+        self.line += 1;
+        self.remaining -= 1;
+    }
+}
+
 struct Lineorder {
     rows: u64,
     customers: u64,
@@ -451,7 +482,7 @@ struct Lineorder {
     fields: Stream,
     orders: Stream,
     date_keys: Vec<i64>,
-    starts: OnceLock<Vec<(i64, i64)>>,
+    starts: OnceLock<Vec<Cursor>>,
 }
 
 impl Lineorder {
@@ -471,27 +502,15 @@ impl Lineorder {
         }
     }
 
-    fn starts(&self) -> &[(i64, i64)] {
+    fn starts(&self) -> &[Cursor] {
         self.starts.get_or_init(|| {
             let mut starts = Vec::with_capacity(self.blocks() as usize);
-            let (mut key, mut line) = (1_i64, 0_i64);
+            let mut cursor = Cursor::default();
             for block in 0..self.blocks() {
-                starts.push((key, line));
-                let rows = block_len(self.rows, block);
-                let mut flags = self.orders.block(block);
-                let (mut count, mut last) = (0_i64, None);
-                for row in 0..rows {
-                    if flags.u32() < NEW_ORDER_THRESHOLD || (block == 0 && row == 0) {
-                        count += 1;
-                        last = Some(row);
-                    }
-                }
-                match last {
-                    Some(last) => {
-                        key += count;
-                        line = (rows - last) as i64;
-                    }
-                    None => line += rows as i64,
+                starts.push(cursor);
+                let mut orders = self.orders.block(block);
+                for _ in 0..block_len(self.rows, block) {
+                    cursor.step(&mut orders);
                 }
             }
             starts
@@ -510,7 +529,7 @@ impl Table for Lineorder {
 
     fn block(&self, index: u64) -> RecordBatch {
         let rows = block_len(self.rows, index);
-        let (mut order_key, mut line) = self.starts()[index as usize];
+        let mut cursor = self.starts()[index as usize];
         let mut flags = self.orders.block(index);
         let mut draw = self.fields.block(index);
         let mut ints: [Vec<i64>; 15] = std::array::from_fn(|_| Vec::with_capacity(rows));
@@ -521,13 +540,8 @@ impl Table for Lineorder {
             self.suppliers as i64,
             self.parts as i64,
         );
-        for row in 0..rows {
-            if flags.u32() < NEW_ORDER_THRESHOLD || (index == 0 && row == 0) {
-                order_key += 1;
-                line = 1;
-            } else {
-                line += 1;
-            }
+        for _ in 0..rows {
+            cursor.step(&mut flags);
             let customer = draw.range(1, customers);
             let part = draw.range(1, parts);
             let supplier = draw.range(1, suppliers);
@@ -543,8 +557,8 @@ impl Table for Lineorder {
             let commit_day = order_day + draw.range(1, MAX_COMMIT_DAYS) as usize;
             ship_modes.append_value(draw.pick(&SHIP_MODES));
             let values = [
-                order_key,
-                line,
+                sparse_order_key(cursor.key),
+                cursor.line,
                 customer,
                 part,
                 supplier,
