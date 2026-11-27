@@ -408,26 +408,41 @@ struct CommentStripper {
 
 impl CommentStripper {
     fn strip(&mut self, line: &str) -> String {
-        let mut text = line;
-        let mut opened = None;
-        if !self.in_comment {
-            if let Some(dash) = text.find("--") {
-                text = &text[..dash];
-            }
-            if let Some(brace) = text.find('{') {
+        let mut text = line.to_owned();
+        if !self.in_comment
+            && let Some(dash) = text.find('-')
+            && text.as_bytes().get(dash + 1) == Some(&b'-')
+        {
+            text.truncate(dash);
+        }
+        loop {
+            if !self.in_comment {
+                let Some(open) = text.find('{') else {
+                    return text;
+                };
                 self.in_comment = true;
-                opened = Some(brace + 1);
+                match text[open + 1..].find('}') {
+                    Some(close) => {
+                        text.replace_range(..open + 1 + close + 1, "");
+                        self.in_comment = false;
+                    }
+                    None => {
+                        text.clear();
+                        return text;
+                    }
+                }
+            } else {
+                match text.find('}') {
+                    Some(close) => {
+                        text.replace_range(..=close, "");
+                        self.in_comment = false;
+                    }
+                    None => {
+                        text.clear();
+                        return text;
+                    }
+                }
             }
-        }
-        if !self.in_comment {
-            return text.to_owned();
-        }
-        match text[opened.unwrap_or(0)..].find('}') {
-            Some(end) => {
-                self.in_comment = false;
-                text[opened.unwrap_or(0) + end + 1..].to_owned()
-            }
-            None => String::new(),
         }
     }
 }
@@ -578,6 +593,16 @@ mod tests {
         assert!(!stripper.in_comment);
         assert_eq!(stripper.strip("a -- note { b\n"), "a ");
         assert!(!stripper.in_comment);
+    }
+
+    #[test]
+    fn only_the_first_dash_is_checked_and_each_comment_on_a_line_is_removed() {
+        let mut stripper = CommentStripper { in_comment: false };
+        assert_eq!(stripper.strip("a - b -- c\n"), "a - b -- c\n");
+        assert_eq!(stripper.strip("a { x } b { y } c\n"), " c\n");
+        assert!(!stripper.in_comment);
+        assert_eq!(stripper.strip("a { -- } b\n"), "");
+        assert!(stripper.in_comment);
     }
 
     #[test]

@@ -229,6 +229,7 @@ mod tests {
             || "cancelled",
             |job| {
                 produced.fetch_add(1, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(1));
                 Ok::<_, &str>(job)
             },
             |_| {

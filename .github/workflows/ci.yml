@@ -14,6 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  BENCHBOX_REF: 5cae9afda8939c965ba95de7865817e72875879e
 
 jobs:
   rust:
@@ -27,7 +28,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: BenchBox-dev/benchbox
-          ref: 5cae9afda8939c965ba95de7865817e72875879e
+          ref: ${{ env.BENCHBOX_REF }}
           path: benchbox-checkout
           sparse-checkout: |
             tests/fixtures/tpc_query_corpus
@@ -71,7 +72,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: BenchBox-dev/benchbox
-          ref: 5cae9afda8939c965ba95de7865817e72875879e
+          ref: ${{ env.BENCHBOX_REF }}
           path: benchbox-checkout
           sparse-checkout: |
             tests/fixtures/tpc_query_corpus
