@@ -24,7 +24,7 @@ pinned by exact version. This project does not fork them: fixes go upstream, and
 patch carried until upstream releases it is listed under
 [Carried upstream patches](#carried-upstream-patches).
 
-Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) and SSB (all five tables, any scale factor) as
+Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`), SSB (all five tables, any scale factor) and the Coffeeshop benchmark (all three tables, any scale factor) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
 `NOT NULL` columns non-nullable). Delimited output is byte-identical to the
@@ -239,6 +239,44 @@ apply `rowcount("active_x", "store")`, which is the smaller of the value and the
 are a data-dependent subset of the matching sales range, so no exact bounds exist
 without generating the returns rows; the bounds of the sales range would be only a
 superset, and are left out so that every reported range is exact.
+
+### Coffeeshop
+
+Tables, columns, types, patterns and seed data are those of BenchBox's legacy
+`CoffeeShopDataGenerator`, which has no random numbers at all: it spreads
+orders over days, regions and locations by largest-remainder apportionment and
+fills every other field from fixed repeating patterns. The library reproduces
+that arithmetic in closed form, so any row is a pure function of its row index
+and a block never needs the rows before it. The seed is accepted for API
+uniformity and has no effect, as in the legacy generator (all five legacy
+seeds give the same files). Delimited files are comma-separated CSV without a
+header, like legacy, with `decimal128(8, 2)` / `decimal128(10, 2)` prices
+written with two decimals; `order_time` is `utf8` (`HH:MM:SS`), the arrow type
+BenchBox's converter assigns to `TIME`.
+
+| Table | Rows at scale factor `SF` | Source |
+| :--- | :--- | :--- |
+| `dim_locations` | 1,000, all scale factors | vendored seed file `benchbox/data/coffeeshop/dim_locations.csv` (500 South, 250 Southeast, 250 West) |
+| `dim_products` | 26, all scale factors | vendored seed file `dim_products.csv` (13 products in two availability windows, 2022-01-01..2023-02-28 and 2023-03-01..2024-12-31) |
+| `order_lines` | `156 * floor(N / 100) + (lines of the first N mod 100 orders)` with `N = max(1, round(8,500,000 * SF))` | legacy `calculate_order_count` and the 100-order line-count cycle (60 x 1, 30 x 2, 5 x 3, 4 x 4, 1 x 5 lines) |
+
+`order_lines` is `13,260,000` rows at `SF 1` (8,500,000 orders). Order `k`
+(from 1) is placed on the day, region and location given by the legacy
+apportionment (month weights, a linear trend from 0.85 to 1.20, region weights
+1.25 / 1.10 / 0.90, equal location weights, Python 3.12 `sum` for the weight
+totals), carries `ORDER_LINE`, `TIME` and per-line `SUBCATEGORY`, `QUANTITY` and
+price-multiplier values from the legacy cycles indexed by order or line number,
+and takes its product from a per-window, per-subcategory rotation. Unit prices
+are `round(price * multiplier, 2)` computed in binary floating point exactly as
+in legacy; total price is `unit price * quantity` in cents. Because nothing is
+sampled, the library's `order_lines` is identical to the legacy file at every
+scale factor (see `delimited_output_equals_the_legacy_files_apart_from_line_endings`)
+apart from line endings: the legacy writer emits CRLF, the library `\n`.
+
+`tools/synthetic_acceptance.py coffeeshop ...` (config in
+`tools/synthetic_configs/coffeeshop.py`) produces the comparison that gates the
+frozen goldens in `crates/benchbox-datagen-core/tests/coffeeshop.rs`. The
+dimension files are embedded from `crates/benchbox-datagen-core/src/synthetic/coffeeshop_data/`.
 
 ## Adding a synthetic generator
 
