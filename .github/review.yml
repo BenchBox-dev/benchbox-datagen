@@ -1,0 +1,162 @@
+version: 2
+mode: enforce
+status_context: review-verdict
+findings_delivery: review
+bot_login: benchbox-review
+consumer:
+  gated_base:
+    - main
+  review_guidance: .github/review-guidance.md
+  attesters:
+    - joeharris76
+  soundness_manifest: .github/soundness-paths.txt
+  omp_config: .github/review-omp-config.yml
+  inert_manifest: .github/inert-paths.txt
+minimize_superseded: true
+dashboard_comment: true
+check_run_mirror: true
+classifier_issue: true
+max_attempts: 5
+protocol:
+  max_defects: 10
+  max_do_not_ship: 3
+  max_finding_rounds: 4
+brief:
+  include_intent: true
+  structured_findings: true
+  suggestions: true
+retry:
+  daily_budget: 6
+  backoff_start_minutes: 60
+  sweep_max_dispatches: 5
+omp:
+  version: 18.20.0
+  builds:
+    linux-x64:
+      url: https://build.stencil.so/d/omp/20261112-234053-c308970/omp-linux-x64
+      sha256: c8694be8c6e6a1f45e3636dd8a8e9eaa78878ad629a89000b403ec5e456d3f89
+    linux-arm64:
+      url: https://build.stencil.so/d/omp/20261112-234053-c308970/omp-linux-arm64
+      sha256: 8b5e197db7c58b7ebabf83c6f03597f89bae3a766a84c6481b3a942a125f5e22
+    darwin-arm64:
+      url: https://build.stencil.so/d/omp/20261112-234053-c308970/omp-darwin-arm64
+      sha256: 2b1309b06a743ae939708f939b63f75c7a436ed08c7953309f0e387e0c793ead
+pools: [claude, codex]
+reviewers:
+  trivial:
+    harness: omp
+    family: codex
+    pool: codex
+    model: "@smol"
+    effort: ""
+    role: review
+    read_only: hard
+    reads_files: true
+    timeout_minutes: 15
+    enabled: true
+  small:
+    harness: omp
+    family: codex
+    pool: codex
+    model: "@smol"
+    effort: ""
+    role: review
+    read_only: hard
+    reads_files: true
+    timeout_minutes: 20
+    enabled: true
+  medium:
+    harness: omp
+    family: claude
+    pool: claude
+    model: "@default"
+    effort: ""
+    role: review
+    read_only: hard
+    reads_files: true
+    timeout_minutes: 25
+    enabled: true
+  large:
+    harness: omp
+    family: claude
+    pool: claude
+    model: "@review"
+    effort: ""
+    role: review
+    read_only: hard
+    reads_files: true
+    timeout_minutes: 30
+    enabled: true
+  huge:
+    harness: omp
+    family: claude
+    pool: claude
+    model: "@plan"
+    effort: ""
+    role: review
+    read_only: hard
+    reads_files: true
+    timeout_minutes: 40
+    enabled: true
+  max:
+    harness: omp
+    family: claude
+    pool: claude
+    model: "@slow"
+    effort: ""
+    role: review
+    read_only: hard
+    reads_files: true
+    timeout_minutes: 45
+    enabled: true
+buckets:
+  trivial: trivial
+  small: small
+  medium: medium
+  large: large
+  huge: huge
+  max: max
+classifier:
+  unavailable_bucket: max
+  fallback: decisions
+  fallback_min_bucket: large
+  size_floor:
+    min_lines: 1500
+    exclude:
+      - "*Cargo.lock"
+      - "*uv.lock"
+      - "*theseus-lock.json"
+      - "THIRD_PARTY_LICENSES"
+  gate_paths:
+    - .github/review.yml
+    - .github/review-omp-config.yml
+    - .github/review-guidance.md
+    - .github/theseus-lock.json
+    - .github/soundness-paths.txt
+    - .github/inert-paths.txt
+    - .github/workflows/review-gate.yml
+    - .github/workflows/review-request.yml
+    - .github/workflows/review-verdict.yml
+    - .github/workflows/review-pins.yml
+    - tools/check_review_pins.py
+  logic_paths:
+    - "*rng*"
+    - "*seed*"
+    - "*checksum*"
+    - "*ffi*"
+    - "*determinism*"
+  data_paths:
+    - "*distributions*"
+    - "*.dss"
+    - "*.dst"
+evidence:
+  exempt_paths:
+    - "README*.md"
+    - "**/README*.md"
+    - "CHANGELOG*.md"
+    - "**/CHANGELOG*.md"
+    - "docs/*.md"
+promotion:
+  package: theseus-reviewer
+  repository: joeharris76/theseus
+  dependencies: {}

@@ -1,0 +1,10 @@
+prefix	.github/
+file	Cargo.toml
+file	Cargo.lock
+prefix	crates/
+file	pyproject.toml
+prefix	tools/
+file	THIRD_PARTY_LICENSES
+file	about.toml
+file	about.hbs
+file	LICENSE

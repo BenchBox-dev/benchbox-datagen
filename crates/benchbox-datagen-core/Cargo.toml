@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 arrow.workspace = true
+parquet.workspace = true
 benchbox-datagen-writers.workspace = true
 itoa.workspace = true
 rand_chacha.workspace = true
@@ -17,7 +18,6 @@ tpchgen.workspace = true
 tpchgen-arrow.workspace = true
 
 [dev-dependencies]
-parquet.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 
