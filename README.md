@@ -160,6 +160,16 @@ byte-identical to legacy `date.tbl` for its 2,556 rows, apart from line endings
 foreign-key and uniqueness checks and the 13-query DuckDB/DataFusion agreement
 that gate the frozen goldens in `crates/benchbox-datagen-core/tests/ssb.rs`.
 
+Acceptance rules: a distribution metric passes inside the min-max of 5 legacy
+seeds, inside their 99.9% prediction interval, or (boundary quantiles of
+low-cardinality columns) by rank. For the date-valued `lo_orderdate` and
+`lo_commitdate` the legacy statistics drop rows dated 1998-12-31, the one day
+the two calendars do not share, and the same rule applies. `date` columns are
+compared by a digest of the shared rows. A query that legacy never leaves empty
+must never be empty in the library; where legacy is sometimes empty, the library
+fails only if its empty-seed count is higher with one-sided Fisher exact
+p < 0.001.
+
 ## Layout
 
 | Crate | Role |

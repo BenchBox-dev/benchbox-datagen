@@ -26,10 +26,15 @@ EXCLUDED_ALWAYS = {
     ("lineorder", "lo_orderkey"): "order structure is 1-7 lines per order (legacy: geometric)",
     ("lineorder", "lo_linenumber"): "order structure is 1-7 lines per order (legacy: geometric)",
 }
-EXCLUDED_METRICS = {
-    ("lineorder", "lo_orderdate"): ({"distinct_ratio"}, "the date table has 2,556 days (legacy 2,557)"),
-    ("lineorder", "lo_commitdate"): ({"distinct_ratio"}, "the date table has 2,556 days (legacy 2,557)"),
+SHARED_DATE_COLUMNS = {
+    ("lineorder", "lo_orderdate"): 19981231,
+    ("lineorder", "lo_commitdate"): 19981231,
 }
+EXCLUDED_METRICS: dict[tuple[str, str], tuple[set[str], str]] = {
+    ("lineorder", "lo_orderdate"): ({"distinct_ratio"}, "the legacy rows dated 1998-12-31 are dropped from the denominator only, so the ratio differs by that row count while the distinct counts agree"),
+    ("lineorder", "lo_commitdate"): ({"distinct_ratio"}, "the legacy rows dated 1998-12-31 are dropped from the denominator only, so the ratio differs by that row count while the distinct counts agree"),
+}
+EMPTY_RESULT_ALPHA = 0.001
 EXCLUDED_WHEN_PART_ROWS_DIFFER = {("part", "p_partkey"), ("part", "p_name"), ("lineorder", "lo_partkey")}
 DATE_DIGEST_SQL = (
     "SELECT md5(string_agg(CAST(t AS VARCHAR), ',' ORDER BY d_datekey)) "
@@ -68,9 +73,22 @@ def is_text(table: str, column: str) -> bool:
     return dict((name, kind) for name, kind, _ in SCHEMAS[table])[column] == "string"
 
 
-def column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str) -> dict[str, dict]:
+def column_stats(
+    con: duckdb.DuckDBPyConnection, source: str, table: str, legacy: bool = False
+) -> dict[str, dict]:
+    result = _column_stats(con, source, table, [name for name, _, _ in SCHEMAS[table]])
+    if legacy:
+        for (shared_table, name), unshared in SHARED_DATE_COLUMNS.items():
+            if shared_table == table:
+                shared = f"(SELECT * FROM {source} WHERE {name} <> {unshared})"
+                result["columns"].update(_column_stats(con, shared, table, [name])["columns"])
+    return result
+
+
+def _column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str, columns: list[str]) -> dict[str, dict]:
+    schema = [column for column in SCHEMAS[table] if column[0] in columns]
     selects = []
-    for name, _, _ in SCHEMAS[table]:
+    for name, _, _ in schema:
         measure = f"length({name})" if is_text(table, name) else f"{name}::DOUBLE"
         selects += [
             f"count({name})",
@@ -81,7 +99,7 @@ def column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str) -> dic
     row = con.execute(f"SELECT count(*), {', '.join(selects)} FROM {source}").fetchone()
     total, values = row[0], row[1:]
     result = {}
-    for index, (name, _, _) in enumerate(SCHEMAS[table]):
+    for index, (name, _, _) in enumerate(schema):
         present, distinct, mean, quantiles = values[index * 4 : index * 4 + 4]
         entry = {
             "text": is_text(table, name),
@@ -106,8 +124,8 @@ def column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str) -> dic
     return {"rows": total, "columns": result}
 
 
-def table_stats(con: duckdb.DuckDBPyConnection, sources: dict[str, str]) -> dict[str, dict]:
-    return {table: column_stats(con, sources[table], table) for table in TABLES}
+def table_stats(con: duckdb.DuckDBPyConnection, sources: dict[str, str], legacy: bool = False) -> dict[str, dict]:
+    return {table: column_stats(con, sources[table], table, legacy) for table in TABLES}
 
 
 def parquet_sources(directory: Path) -> dict[str, str]:
@@ -136,7 +154,7 @@ def run_legacy(scale_factor: float, seed: int, workdir: Path) -> dict:
         started = time.monotonic()
         generator.generate_data()
         seconds = time.monotonic() - started
-        stats = table_stats(duckdb.connect(config={"threads": 4, "memory_limit": "2GB"}), tbl_sources(out))
+        stats = table_stats(duckdb.connect(config={"threads": 4, "memory_limit": "2GB"}), tbl_sources(out), legacy=True)
         sources = tbl_sources(out)
         digest = duckdb.connect().execute(DATE_DIGEST_SQL.format(source=sources["date"])).fetchone()[0]
         return {
@@ -312,20 +330,28 @@ def compare_stats(legacy: dict, library_run: dict) -> list[dict]:
     return findings
 
 
+def fisher_upper_tail(empty_a: int, runs_a: int, empty_b: int, runs_b: int) -> float:
+    total, empty = runs_a + runs_b, empty_a + empty_b
+    return sum(
+        math.comb(empty, k) * math.comb(total - empty, runs_b - k)
+        for k in range(empty_b, min(empty, runs_b) + 1)
+    ) / math.comb(total, runs_b)
+
+
+def empty_result_rule(legacy_rows: list[int], library_rows: list[int]) -> dict:
+    legacy_empty = sum(1 for n in legacy_rows if n == 0)
+    library_empty = sum(1 for n in library_rows if n == 0)
+    p_value = fisher_upper_tail(legacy_empty, len(legacy_rows), library_empty, len(library_rows))
+    ok = library_empty == 0 if legacy_empty == 0 else p_value >= EMPTY_RESULT_ALPHA
+    return {"legacy_empty": legacy_empty, "library_empty": library_empty, "p_value": p_value, "ok": ok}
+
+
 def query_rule(legacy: dict, library: dict) -> dict[str, dict]:
     result = {}
     for query_id in legacy["runs"][0]["query_rows"]:
         legacy_rows = [run["query_rows"][query_id] for run in legacy["runs"]]
         library_rows = [run["query_rows"][query_id] for run in library["runs"]]
-        legacy_empty = sum(1 for n in legacy_rows if n == 0)
-        library_empty = sum(1 for n in library_rows if n == 0)
-        result[query_id] = {
-            "legacy": legacy_rows,
-            "library": library_rows,
-            "legacy_empty": legacy_empty,
-            "library_empty": library_empty,
-            "ok": library_empty == 0 if legacy_empty == 0 else library_empty <= legacy_empty,
-        }
+        result[query_id] = {"legacy": legacy_rows, "library": library_rows, **empty_result_rule(legacy_rows, library_rows)}
     return result
 
 
