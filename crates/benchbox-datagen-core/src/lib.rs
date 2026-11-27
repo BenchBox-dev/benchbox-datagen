@@ -175,6 +175,7 @@ pub fn write_refresh_sets(
             sets,
             rng_seed.unwrap_or(tpcds_update::DEFAULT_SEED),
             output_dir,
+            cancel,
         ),
     }
 }

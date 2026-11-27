@@ -1,4 +1,4 @@
-import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,6 +50,7 @@ def main() -> int:
     for table, (first, last) in tables.items():
         lines.append(f"pub(super) const TABLE_{table}: Span = Span {{ first: {first}, last: {last} }};")
     out.write_text("\n".join(lines) + "\n")
+    subprocess.run(["rustfmt", "--edition", "2024", str(out)], check=True)
     return 0
 
 

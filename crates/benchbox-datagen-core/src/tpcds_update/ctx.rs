@@ -2,26 +2,65 @@ use tpcdsgen::distribution::CatalogPageTypesDistribution;
 use tpcdsgen::distribution::hours_distribution::{HoursDistribution, HoursWeights};
 use tpcdsgen::random::RandomTextGenerator;
 
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::columns::Col;
 use super::plan::Plan;
 use super::rng::Rng;
+use crate::Error;
 use crate::tpcds::{id_count, source_rows};
 
 const CATALOGS_PER_YEAR: i64 = 18;
 const CATALOG_YEARS: i64 = 6;
 
-pub(super) struct Ctx {
+pub(super) struct Run<'a> {
+    cancel: &'a AtomicBool,
+    created: RefCell<Vec<PathBuf>>,
+}
+
+impl<'a> Run<'a> {
+    pub(super) fn new(cancel: &'a AtomicBool) -> Self {
+        Self {
+            cancel,
+            created: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub(super) fn check(&self) -> Result<(), Error> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn record(&self, path: &Path) {
+        self.created.borrow_mut().push(path.to_path_buf());
+    }
+
+    pub(super) fn remove_created(&self) {
+        for path in self.created.borrow().iter() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub(super) struct Ctx<'a> {
+    pub(super) run: &'a Run<'a>,
     pub(super) rng: Rng,
     pub(super) plan: Plan,
     pub(super) scale: f64,
     pub(super) text: RandomTextGenerator,
 }
 
-impl Ctx {
-    pub(super) fn new(scale: f64, update: i32, seed: i32) -> Self {
+impl<'a> Ctx<'a> {
+    pub(super) fn new(run: &'a Run<'a>, scale: f64, update: i32, seed: i32) -> Self {
         let mut rng = Rng::new(seed);
         let plan = Plan::new(scale, update, &mut rng);
         Self {
+            run,
             rng,
             plan,
             scale,

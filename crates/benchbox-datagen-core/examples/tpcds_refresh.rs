@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 
 use benchbox_datagen_core::{Benchmark, write_refresh_sets};
 
@@ -8,7 +9,15 @@ fn main() {
     let sets: i32 = args[2].parse().expect("sets");
     let dir = PathBuf::from(&args[3]);
     let seed: Option<i32> = args.get(4).map(|s| s.parse().expect("rng seed"));
-    let stats = write_refresh_sets(Benchmark::Tpcds, scale, sets, seed, &dir).expect("refresh");
+    let stats = write_refresh_sets(
+        Benchmark::Tpcds,
+        scale,
+        sets,
+        seed,
+        &dir,
+        &AtomicBool::new(false),
+    )
+    .expect("refresh");
     for stat in stats {
         println!("{} {} {}", stat.path.display(), stat.rows, stat.bytes);
     }

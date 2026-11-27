@@ -11,14 +11,16 @@ mod scd;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 use crate::{Error, FileStats};
 use calendar::date_string;
-use ctx::Ctx;
+use ctx::{Ctx, Run};
 
 pub(crate) use rng::DEFAULT_SEED;
 
-fn write_delete_file(path: &Path, dates: &[i32; 6]) -> Result<FileStats, Error> {
+fn write_delete_file(run: &Run, path: &Path, dates: &[i32; 6]) -> Result<FileStats, Error> {
+    run.check()?;
     let mut text = String::new();
     for pair in dates.chunks(2) {
         text.push_str(&format!(
@@ -28,6 +30,7 @@ fn write_delete_file(path: &Path, dates: &[i32; 6]) -> Result<FileStats, Error> 
         ));
     }
     let io = |e: std::io::Error| Error::Write(format!("{}: {e}", path.display()));
+    run.record(path);
     let mut file = File::create(path).map_err(io)?;
     file.write_all(text.as_bytes()).map_err(io)?;
     Ok(FileStats {
@@ -43,29 +46,37 @@ pub(crate) fn write_tpcds_refresh(
     sets: i32,
     seed: i32,
     output_dir: &Path,
+    cancel: &AtomicBool,
 ) -> Result<Vec<FileStats>, Error> {
     fs::create_dir_all(output_dir)
         .map_err(|e| Error::Write(format!("{}: {e}", output_dir.display())))?;
-    let mut stats = Vec::new();
-    for update in 1..=sets {
-        stats.extend(write_set(scale_factor, update, seed, output_dir)?);
+    let run = Run::new(cancel);
+    let outcome = (1..=sets).try_fold(Vec::new(), |mut stats, update| {
+        stats.extend(write_set(&run, scale_factor, update, seed, output_dir)?);
+        Ok(stats)
+    });
+    if outcome.is_err() {
+        run.remove_created();
     }
-    Ok(stats)
+    outcome
 }
 
 fn write_set(
+    run: &Run,
     scale_factor: f64,
     update: i32,
     seed: i32,
     dir: &Path,
 ) -> Result<Vec<FileStats>, Error> {
-    let mut ctx = Ctx::new(scale_factor, update, seed);
+    let mut ctx = Ctx::new(run, scale_factor, update, seed);
     let mut stats = vec![
         write_delete_file(
+            ctx.run,
             &dir.join(format!("delete_{update}.dat")),
             &ctx.plan.update_dates,
         )?,
         write_delete_file(
+            ctx.run,
             &dir.join(format!("inventory_delete_{update}.dat")),
             &ctx.plan.inventory_dates,
         )?,
@@ -83,6 +94,7 @@ fn write_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     const SF1_SET1: [(&str, u64, u64); 23] = [
         ("delete_1.dat", 3, 66),
@@ -117,7 +129,8 @@ mod tests {
     #[test]
     fn scale_factor_one_set_one_has_the_dsdgen_file_set_and_sizes() {
         let dir = tempfile::tempdir().unwrap();
-        let stats = write_tpcds_refresh(1.0, 1, DEFAULT_SEED, dir.path()).unwrap();
+        let stats =
+            write_tpcds_refresh(1.0, 1, DEFAULT_SEED, dir.path(), &AtomicBool::new(false)).unwrap();
         let mut seen: Vec<(String, u64, u64)> = stats
             .iter()
             .map(|s| {
@@ -146,7 +159,7 @@ mod tests {
     #[test]
     fn scale_factor_one_files_start_with_the_dsdgen_rows() {
         let dir = tempfile::tempdir().unwrap();
-        write_tpcds_refresh(1.0, 2, DEFAULT_SEED, dir.path()).unwrap();
+        write_tpcds_refresh(1.0, 2, DEFAULT_SEED, dir.path(), &AtomicBool::new(false)).unwrap();
         assert_eq!(
             read(dir.path(), "delete_1.dat"),
             "2000-05-20|2000-05-21\n1999-09-18|1999-09-19\n2002-11-12|2002-11-13\n"
@@ -177,9 +190,9 @@ mod tests {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
-        write_tpcds_refresh(0.01, 1, 20_260_709, first.path()).unwrap();
-        write_tpcds_refresh(0.01, 1, 20_260_709, second.path()).unwrap();
-        write_tpcds_refresh(0.01, 1, DEFAULT_SEED, other.path()).unwrap();
+        write_tpcds_refresh(0.01, 1, 20_260_709, first.path(), &AtomicBool::new(false)).unwrap();
+        write_tpcds_refresh(0.01, 1, 20_260_709, second.path(), &AtomicBool::new(false)).unwrap();
+        write_tpcds_refresh(0.01, 1, DEFAULT_SEED, other.path(), &AtomicBool::new(false)).unwrap();
         for name in ["s_purchase_1.dat", "s_customer_1.dat", "delete_1.dat"] {
             assert_eq!(
                 read(first.path(), name),
@@ -188,5 +201,34 @@ mod tests {
             );
             assert_ne!(read(first.path(), name), read(other.path(), name), "{name}");
         }
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_cancelled_run_leaves_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancelled = AtomicBool::new(true);
+        let result = write_tpcds_refresh(0.01, 2, DEFAULT_SEED, dir.path(), &cancelled);
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(entries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_run_cancelled_midway_removes_the_files_it_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let run = Run::new(&cancel);
+        let mut out = out::Out::create(&run, dir.path(), "s_purchase", 1).unwrap();
+        out.int(1).end().unwrap();
+        cancel.store(true, Ordering::Relaxed);
+        assert!(matches!(out.end(), Err(Error::Cancelled)));
+        run.remove_created();
+        assert!(entries(dir.path()).is_empty());
     }
 }

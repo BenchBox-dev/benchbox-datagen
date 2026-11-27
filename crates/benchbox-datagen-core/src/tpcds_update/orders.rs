@@ -79,9 +79,9 @@ struct Line {
 
 pub(super) fn write_purchases(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats>, Error> {
     let update = ctx.plan.update;
-    let mut purchases = Out::create(dir, "s_purchase", update)?;
-    let mut lines = Out::create(dir, "s_purchase_lineitem", update)?;
-    let mut returns = Out::create(dir, "s_store_returns", update)?;
+    let mut purchases = Out::create(ctx.run, dir, "s_purchase", update)?;
+    let mut lines = Out::create(ctx.run, dir, "s_purchase_lineitem", update)?;
+    let mut returns = Out::create(ctx.run, dir, "s_store_returns", update)?;
     let rows = ctx.plan.rows(Channel::Store);
     let item_count = ctx.ids("item") as i32;
     let mut items: Option<Items> = None;
@@ -172,9 +172,9 @@ fn master_customers(ctx: &mut Ctx, bill: Col, ship: Col) -> (i64, i64) {
 
 pub(super) fn write_catalog_orders(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats>, Error> {
     let update = ctx.plan.update;
-    let mut orders = Out::create(dir, "s_catalog_order", update)?;
-    let mut lines = Out::create(dir, "s_catalog_order_lineitem", update)?;
-    let mut returns = Out::create(dir, "s_catalog_returns", update)?;
+    let mut orders = Out::create(ctx.run, dir, "s_catalog_order", update)?;
+    let mut lines = Out::create(ctx.run, dir, "s_catalog_order_lineitem", update)?;
+    let mut returns = Out::create(ctx.run, dir, "s_catalog_returns", update)?;
     let rows = ctx.plan.rows(Channel::Catalog);
     let item_count = ctx.ids("item") as i32;
     let mut items: Option<Items> = None;
@@ -282,9 +282,9 @@ pub(super) fn write_catalog_orders(ctx: &mut Ctx, dir: &Path) -> Result<Vec<File
 
 pub(super) fn write_web_orders(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats>, Error> {
     let update = ctx.plan.update;
-    let mut orders = Out::create(dir, "s_web_order", update)?;
-    let mut lines = Out::create(dir, "s_web_order_lineitem", update)?;
-    let mut returns = Out::create(dir, "s_web_returns", update)?;
+    let mut orders = Out::create(ctx.run, dir, "s_web_order", update)?;
+    let mut lines = Out::create(ctx.run, dir, "s_web_order_lineitem", update)?;
+    let mut returns = Out::create(ctx.run, dir, "s_web_returns", update)?;
     let rows = ctx.plan.rows(Channel::Web);
     let item_count = ctx.ids("item") as i32;
     let mut items: Option<Items> = None;

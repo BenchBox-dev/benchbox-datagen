@@ -179,7 +179,7 @@ struct CallCenterOld {
 }
 
 fn write_call_center(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_call_center", ctx.plan.update)?;
+    let mut out = Out::create(ctx.run, dir, "s_call_center", ctx.plan.update)?;
     let rows = super::dims::source_table_rows("s_call_center", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = CallCenterOld::default();
@@ -270,7 +270,7 @@ struct ItemOld {
 }
 
 fn write_item(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_item", ctx.plan.update)?;
+    let mut out = Out::create(ctx.run, dir, "s_item", ctx.plan.update)?;
     let rows = super::dims::source_table_rows("s_item", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = ItemOld::default();
@@ -358,7 +358,7 @@ struct StoreOld {
 }
 
 fn write_store(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_store", ctx.plan.update)?;
+    let mut out = Out::create(ctx.run, dir, "s_store", ctx.plan.update)?;
     let rows = super::dims::source_table_rows("s_store", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = StoreOld::default();
@@ -461,7 +461,7 @@ fn web_site_duration(scale: f64) -> i64 {
 }
 
 fn write_web_page(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_web_page", ctx.plan.update)?;
+    let mut out = Out::create(ctx.run, dir, "s_web_page", ctx.plan.update)?;
     let rows = super::dims::source_table_rows("s_web_page", ctx.scale);
     let mut order: Option<Order> = None;
     let mut old = WebPageOld::default();
@@ -554,7 +554,7 @@ struct WebSiteOld {
 }
 
 fn write_web_site(ctx: &mut Ctx, dir: &Path) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_web_site", ctx.plan.update)?;
+    let mut out = Out::create(ctx.run, dir, "s_web_site", ctx.plan.update)?;
     let rows = super::dims::source_table_rows("s_web_site", ctx.scale);
     let mut old = WebSiteOld::default();
     let duration = web_site_duration(ctx.scale);

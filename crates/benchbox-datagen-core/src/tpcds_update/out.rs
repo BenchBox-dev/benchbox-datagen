@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use tpcdsgen::types::Decimal;
 
 use super::calendar::date_string;
+use super::ctx::Run;
 use crate::{Error, FileStats};
 
 const BKEY_LEN: usize = 16;
@@ -21,7 +22,8 @@ pub(super) fn business_key(key: i64) -> String {
     out
 }
 
-pub(super) struct Out {
+pub(super) struct Out<'a> {
+    run: &'a Run<'a>,
     table: &'static str,
     path: PathBuf,
     writer: BufWriter<File>,
@@ -31,11 +33,19 @@ pub(super) struct Out {
     bytes: u64,
 }
 
-impl Out {
-    pub(super) fn create(dir: &Path, name: &'static str, update: i32) -> Result<Self, Error> {
+impl<'a> Out<'a> {
+    pub(super) fn create(
+        run: &'a Run<'a>,
+        dir: &Path,
+        name: &'static str,
+        update: i32,
+    ) -> Result<Self, Error> {
+        run.check()?;
         let path = dir.join(format!("{name}_{update}.dat"));
+        run.record(&path);
         let file = File::create(&path).map_err(|e| io_error(&path, e))?;
         Ok(Self {
+            run,
             table: name,
             path,
             writer: BufWriter::with_capacity(1 << 20, file),
@@ -117,6 +127,7 @@ impl Out {
     }
 
     pub(super) fn end(&mut self) -> Result<(), Error> {
+        self.run.check()?;
         self.line.push('\n');
         self.writer
             .write_all(self.line.as_bytes())

@@ -136,7 +136,7 @@ fn write_customer_address(
     update: i32,
     scaling: &tpcdsgen::config::Scaling,
 ) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_customer_address", update)?;
+    let mut out = Out::create(ctx.run, dir, "s_customer_address", update)?;
     for index in 1..=source_table_rows("s_customer_address", ctx.scale) {
         ctx.rng.next(CA_NULLS);
         let address = make_address(ctx, scaling);
@@ -159,7 +159,7 @@ fn write_customer_address(
 
 fn write_catalog_page(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, Error> {
     const CATALOGS_PER_YEAR: i64 = 18;
-    let mut out = Out::create(dir, "s_catalog_page", update)?;
+    let mut out = Out::create(ctx.run, dir, "s_catalog_page", update)?;
     let per_catalog = ctx.pages_per_catalog();
     for index in 1..=source_table_rows("s_catalog_page", ctx.scale) {
         ctx.rng.next(CP_NULLS);
@@ -200,7 +200,7 @@ fn write_customer(
     update: i32,
     scaling: &tpcdsgen::config::Scaling,
 ) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_customer", update)?;
+    let mut out = Out::create(ctx.run, dir, "s_customer", update)?;
     let customers = ctx.ids("customer") as usize;
     let permutation = make_permutation(customers, ctx.rng.stream(S_CUST_ID));
     let birth_min = dttoj(1924, 1, 1);
@@ -348,7 +348,7 @@ fn is_null(map: i64, span: Span, column: Col) -> bool {
 }
 
 fn write_promotion(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_promotion", update)?;
+    let mut out = Out::create(ctx.run, dir, "s_promotion", update)?;
     let rows = source_table_rows("s_promotion", ctx.scale);
     let permutation = make_permutation(
         ctx.ids("promotion") as usize,
@@ -437,7 +437,7 @@ fn write_promotion(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, 
 }
 
 fn write_warehouse(ctx: &mut Ctx, dir: &Path, update: i32) -> Result<FileStats, Error> {
-    let mut out = Out::create(dir, "s_warehouse", update)?;
+    let mut out = Out::create(ctx.run, dir, "s_warehouse", update)?;
     let rows = source_table_rows("s_warehouse", ctx.scale);
     let permutation = make_permutation(ctx.ids("warehouse") as usize, ctx.rng.stream(S_WRHS_ID));
     for &entry in permutation.iter().take(rows as usize) {
@@ -475,7 +475,7 @@ fn first_sk(id: i64) -> i64 {
 }
 
 pub(super) fn write_inventory(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats>, Error> {
-    let mut out = Out::create(dir, "s_inventory", ctx.plan.update)?;
+    let mut out = Out::create(ctx.run, dir, "s_inventory", ctx.plan.update)?;
     let items = ctx.ids("item");
     let warehouses = ctx.rows("warehouse");
     for index in 1..=ctx.plan.rows(Channel::Inventory) {
@@ -562,7 +562,7 @@ const GMT_OFFSETS: [(i64, i32); 63] = [
 ];
 
 pub(super) fn write_zip_to_gmt(ctx: &mut Ctx, dir: &Path) -> Result<Vec<FileStats>, Error> {
-    let mut out = Out::create(dir, "s_zip_to_gmt", ctx.plan.update)?;
+    let mut out = Out::create(ctx.run, dir, "s_zip_to_gmt", ctx.plan.update)?;
     for index in 1..=source_table_rows("s_zip_to_gmt", ctx.scale) {
         let zip = index - 1;
         let offset = GMT_OFFSETS
