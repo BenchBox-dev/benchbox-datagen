@@ -4,11 +4,13 @@ use std::io::{self, BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use arrow::record_batch::RecordBatch;
 use benchbox_datagen_writers::{Compression, Error as WriterError, ParquetTableWriter};
+use parquet::errors::ParquetError;
 
 use crate::{Benchmark, Error, conformed, pipeline, tpch, validate_scale_factor};
 
@@ -72,6 +74,12 @@ fn encode_error(path: &Path, error: impl Display) -> Error {
 fn writer_error(path: &Path, error: WriterError) -> Error {
     match error {
         WriterError::Io(error) => io_error(path, error),
+        WriterError::Parquet(ParquetError::External(source)) => {
+            match source.downcast::<io::Error>() {
+                Ok(error) => io_error(path, error),
+                Err(source) => encode_error(path, source),
+            }
+        }
         other => encode_error(path, other),
     }
 }
@@ -91,7 +99,7 @@ struct Cancellable<'a, W> {
 impl<W: Write> Write for Cancellable<'_, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.cancel.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(io::Error::other("cancelled"));
         }
         self.inner.write(buf)
     }
@@ -145,6 +153,7 @@ fn write_with(
         chunk_rows,
         cancel,
         dir: &request.output_dir,
+        created: Mutex::new(Vec::new()),
     };
     let mut stats = Vec::new();
     let outcome = (|| {
@@ -161,13 +170,9 @@ fn write_with(
     match outcome {
         Ok(()) => Ok(stats),
         Err(error) => {
-            for table in request.benchmark.tables() {
-                let _ =
-                    fs::remove_file(file_path(&request.output_dir, table, None, request.format));
-                for part in 1..=request.parts {
-                    let path = file_path(&request.output_dir, table, Some(part), request.format);
-                    let _ = fs::remove_file(path);
-                }
+            let created = job.created.into_inner().unwrap_or_else(|e| e.into_inner());
+            for path in created {
+                let _ = fs::remove_file(path);
             }
             Err(if cancel.load(Ordering::Relaxed) {
                 Error::Cancelled
@@ -187,9 +192,19 @@ struct TableJob<'a> {
     chunk_rows: Option<u64>,
     cancel: &'a AtomicBool,
     dir: &'a Path,
+    created: Mutex<Vec<PathBuf>>,
 }
 
 impl TableJob<'_> {
+    fn create(&self, path: &Path) -> Result<File, Error> {
+        let file = File::create(path).map_err(|e| io_error(path, e))?;
+        self.created
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(path.to_path_buf());
+        Ok(file)
+    }
+
     fn write_parts(
         &self,
         table: &'static str,
@@ -226,7 +241,7 @@ impl TableJob<'_> {
     }
 
     fn stream_file(&self, table: &str, part: i32, parts: i32, path: &Path) -> Result<u64, Error> {
-        let file = File::create(path).map_err(|e| io_error(path, e))?;
+        let file = self.create(path)?;
         match self.format {
             Format::Tbl => {
                 let mut sink = Cancellable {
@@ -265,7 +280,7 @@ impl TableJob<'_> {
         let (driver_rows, default_chunk_rows) = tpch::chunk_driver_rows(table, self.scale_factor);
         let chunk_rows = self.chunk_rows.unwrap_or(default_chunk_rows).max(1);
         let chunks = driver_rows.div_ceil(chunk_rows).clamp(1, i32::MAX as u64) as i32;
-        let file = File::create(&path).map_err(|e| io_error(&path, e))?;
+        let file = self.create(&path)?;
         let window = self.buffered * 2;
         let rows = match self.format {
             Format::Tbl => {
@@ -571,5 +586,92 @@ mod tests {
             assert_eq!(result, Err(Error::Cancelled));
             assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
         }
+    }
+
+    fn cancel_once_output_appears(
+        request: OutputRequest,
+        watched: PathBuf,
+    ) -> Result<Vec<FileStats>, Error> {
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let runner = {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                sender
+                    .send(write_benchmark_cancellable(&request, &cancel))
+                    .unwrap();
+            })
+        };
+        while !watched.exists() && receiver.try_recv().is_err() {
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        cancel.store(true, Ordering::Relaxed);
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("a cancelled write must return promptly");
+        runner.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn cancelling_partway_through_a_split_tbl_write_returns_and_leaves_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let watched = dir.path().join("lineitem.tbl.1");
+        let result =
+            cancel_once_output_appears(request(dir.path(), Format::Tbl, 3, 3, 0.1), watched);
+        assert_eq!(result, Err(Error::Cancelled));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cancelling_partway_through_a_single_parquet_file_returns_and_leaves_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let watched = dir.path().join("lineitem.parquet");
+        let result =
+            cancel_once_output_appears(request(dir.path(), Format::Parquet, 2, 1, 0.1), watched);
+        assert_eq!(result, Err(Error::Cancelled));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_cancelled_sink_fails_write_all_instead_of_retrying() {
+        let cancel = AtomicBool::new(true);
+        let mut sink = Cancellable {
+            inner: Vec::new(),
+            cancel: &cancel,
+        };
+        let error = sink.write_all(b"row").unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(sink.inner.is_empty());
+    }
+
+    #[test]
+    fn parquet_errors_wrapping_io_errors_map_to_the_write_variant() {
+        let path = Path::new("out.parquet");
+        let io = io::Error::new(io::ErrorKind::StorageFull, "disk full");
+        let wrapped = WriterError::Parquet(ParquetError::External(Box::new(io)));
+        assert!(matches!(writer_error(path, wrapped), Error::Write(_)));
+        let plain = WriterError::Io(io::Error::other("closed"));
+        assert!(matches!(writer_error(path, plain), Error::Write(_)));
+        let encode = WriterError::Parquet(ParquetError::General("bad page".into()));
+        assert!(matches!(writer_error(path, encode), Error::Encode(_)));
+        let external = ParquetError::External("not io".into());
+        assert!(matches!(
+            writer_error(path, WriterError::Parquet(external)),
+            Error::Encode(_)
+        ));
+    }
+
+    #[test]
+    fn a_failed_run_keeps_files_it_did_not_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let unreached = dir.path().join("lineitem.tbl");
+        fs::write(&unreached, b"keep me").unwrap();
+        fs::create_dir(dir.path().join("orders.tbl")).unwrap();
+        let result = write_benchmark(&request(dir.path(), Format::Tbl, 2, 1, 0.01));
+        assert!(matches!(result, Err(Error::Write(_))));
+        assert_eq!(fs::read(&unreached).unwrap(), b"keep me");
+        assert!(!dir.path().join("nation.tbl").exists());
+        assert!(!dir.path().join("supplier.tbl").exists());
     }
 }
