@@ -125,8 +125,6 @@ pub fn table_schema(benchmark: Benchmark, table: &str) -> Result<SchemaRef, Erro
     Ok(generate::schema(benchmark, benchmark.table(table)?))
 }
 
-/// TPC-H counts are closed-form. TPC-DS sales and returns counts are produced by
-/// running the generator over every line item, so their cost grows with the scale factor.
 pub fn row_counts(
     benchmark: Benchmark,
     scale_factor: f64,
@@ -134,8 +132,6 @@ pub fn row_counts(
     row_counts_cancellable(benchmark, scale_factor, None, &AtomicBool::new(false))
 }
 
-/// Like [`row_counts`], using `threads` workers (all cores by default) and stopping with
-/// [`Error::Cancelled`] once `cancel` is set.
 pub fn row_counts_cancellable(
     benchmark: Benchmark,
     scale_factor: f64,

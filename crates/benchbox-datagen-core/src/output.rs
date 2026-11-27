@@ -616,7 +616,10 @@ mod tests {
         for format in [Format::Tbl, Format::Parquet] {
             for table in tables {
                 let total = crate::tpcds::source_rows(table, 1.0);
-                let step = total.div_ceil(5).max(1);
+                let mut step = total.div_ceil(11).max(5);
+                while step % 2 == 0 || step % 3 == 0 {
+                    step += 1;
+                }
                 assert!(generate::plan(Benchmark::Tpcds, table, 1.0, Some(step)).len() > 1);
                 assert_eq!(
                     write(table, format, step),
