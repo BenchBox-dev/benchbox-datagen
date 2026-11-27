@@ -218,6 +218,40 @@ output by SHA-256, and `tools/bench_budgets.py` measures the wall-time and
 peak-RSS budgets from the design ADR (`--driver` measures a compiled driver
 binary instead of the Python module).
 
+## TPC-DS query generation
+
+`generate_query("tpcds", ...)` and `generate_tpcds_streams(...)` are a Rust port of `dsqgen`. They interpret
+the template language over BenchBox-supplied inputs only: the `.tpl` templates, the dialect template
+(`netezza.tpl` is the only one BenchBox reaches) and the `tpcds.idx` distribution index, all passed at call
+time. Nothing TPC-authored is committed here beyond the language keywords, the scale-slot volumes and the
+tail-word constants below, which are numbers and names, not distributions or query text. `rowcount()` comes
+from the library scale model (sub-scale rules and `active_locations` included). `parameters=` renders explicit
+values the way `DSQGenBinary.generate_with_parameters` does (it rewrites `[NAME.n]` tokens, then runs a seeded
+dsqgen). The sub-SF1 `query93.tpl` override stays with the caller, as in BenchBox.
+
+`tests/dsqgen_corpus.rs` replays the TPC-DS shards of the BenchBox query corpus (`tpcds_single`,
+`tpcds_stream_template`, `tpcds_stream_all`, `tpcds_explicit`, plus the manifest's Q34 `-LOG`/plain cases) against
+the pinned `BENCHBOX_REF` checkout. `range()` and `list`/`ulist` on `text()` and `date()` are rejected with an error:
+no BenchBox template uses them.
+
+### Heap reads in the C tool
+
+`ulist(random(...), n)` in `dsqgen` reads `n` entries of a key permutation that holds only `max - min + 1` keys.
+When `rowcount()` makes that smaller than `n` (for example three counties at SF 10 for Q16, Q27, Q34, Q36 and Q73, two cities
+at SF 1 for Q46) the C tool reads past the allocation, so its output depends on glibc heap contents (this is why the
+`-LOG` and plain Q34 runs differ). With one key the value is always the minimum and the read is harmless. The library
+models the first word past the allocation (the next chunk's size field) and the neighbouring `StringBuffer_t` words from the
+second evaluation on, with constants fitted to the corpus (`heap_word` in `dsqgen/eval.rs`; `log_run` selects the
+`-LOG` run's layout). The model reproduces every single-template, stream-template, explicit and Q34 corpus record. It cannot
+reproduce a few records whose neighbouring heap objects are other templates' data; the replay test names them:
+
+- `tpcds_stream_all`, SF 10, seed `None`: Q34 text in all 21 streams, Q73 in some streams, Q16 and Q27 in stream 0
+  (68 of 168 excluded checks differ; the stream corpus has 66,696 other matching checks).
+- `tpcds_explicit` round-trip hash `r` for Q16, Q27, Q36 and Q73 at SF 10, seed 1001 (the other checks of those records match).
+
+Scale factors outside the corpus (SF 2-9, 20, 30, 50, 200, 500, 2000 and 5000 for Q16/27/34/36/46/73) have the same read
+and are unverified against the oracle.
+
 ## Carried upstream patches
 
 | Patch | Fork commit | Upstream PR |

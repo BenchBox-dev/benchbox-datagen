@@ -1,5 +1,6 @@
+from collections.abc import Sequence
 from os import PathLike
-from typing import final
+from typing import Literal, final, overload
 
 __version__: str
 
@@ -41,8 +42,9 @@ def write_refresh(
     sets: int = 1,
     rng_seed: int | None = None,
 ) -> list[FileStat]: ...
+@overload
 def generate_query(
-    benchmark: str,
+    benchmark: Literal["tpch"],
     query: str,
     template_text: str,
     distributions_text: str,
@@ -51,3 +53,28 @@ def generate_query(
     stream: int | None = None,
     default_params: bool = False,
 ) -> tuple[str, list[str]]: ...
+@overload
+def generate_query(
+    benchmark: Literal["tpcds"],
+    query: str,
+    template_text: str,
+    distributions_text: bytes | str,
+    scale_factor: float,
+    seed: int | None = None,
+    stream: int | None = None,
+    default_params: bool = False,
+    *,
+    dialect_text: str,
+    parameters: Sequence[tuple[str, str]] | None = None,
+    log_run: bool = False,
+) -> tuple[str, dict[str, str]]: ...
+def generate_tpcds_streams(
+    templates: Sequence[tuple[str, str]],
+    dialect_text: str,
+    distributions: bytes,
+    scale_factor: float,
+    seed: int | None = None,
+    streams: int = 1,
+    qualify: bool = False,
+    log_run: bool = False,
+) -> tuple[str, list[tuple[int, list[tuple[str, str, list[tuple[str, str]]]]]]]: ...

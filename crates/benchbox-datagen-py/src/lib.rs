@@ -6,8 +6,9 @@ use std::thread;
 use std::time::Duration;
 
 use benchbox_datagen_core::{
-    Benchmark, Error, FileStats, OutputRequest, QueryRequest, TableRequest, active_locations,
-    generate_query as core_generate_query, key_ranges, record_batches, row_counts_cancellable,
+    Benchmark, DsqgenQueryRequest, Error, FileStats, OutputRequest, QueryRequest, StreamsRequest,
+    TableRequest, TemplateSource, active_locations, generate_query as core_generate_query,
+    generate_streams, generate_tpcds_query, key_ranges, record_batches, row_counts_cancellable,
     table_scales, write_benchmark_cancellable, write_refresh_sets,
 };
 use pyo3::exceptions::{PyOSError, PyOverflowError, PyRuntimeError, PyValueError};
@@ -327,35 +328,122 @@ fn key_ranges_py<'py>(
     Ok(result)
 }
 
+fn distribution_bytes(source: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(bytes) = source.extract::<Vec<u8>>() {
+        return Ok(bytes);
+    }
+    Ok(source.extract::<String>()?.into_bytes())
+}
+
 #[pyfunction]
-#[pyo3(signature = (benchmark, query, template_text, distributions_text, scale_factor, seed = None, stream = None, default_params = false))]
+#[pyo3(signature = (benchmark, query, template_text, distributions_text, scale_factor, seed = None, stream = None, default_params = false, dialect_text = None, parameters = None, log_run = false))]
 #[allow(clippy::too_many_arguments)]
-fn generate_query(
+fn generate_query<'py>(
+    py: Python<'py>,
     benchmark: &str,
     query: &str,
     template_text: &str,
-    distributions_text: &str,
+    distributions_text: &Bound<'py, PyAny>,
     scale_factor: f64,
     seed: Option<i64>,
     stream: Option<u32>,
     default_params: bool,
-) -> PyResult<(String, Vec<String>)> {
-    if benchmark != "tpch" {
-        return Err(PyValueError::new_err(format!(
-            "query generation is not available for benchmark {benchmark:?}"
-        )));
+    dialect_text: Option<&str>,
+    parameters: Option<Vec<(String, String)>>,
+    log_run: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    match benchmark {
+        "tpch" => {
+            let distributions = distributions_text.extract::<String>()?;
+            let generated = core_generate_query(&QueryRequest {
+                query,
+                template: template_text,
+                distributions: &distributions,
+                scale_factor,
+                seed,
+                stream,
+                default_params,
+            })
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            Ok((generated.text, generated.params)
+                .into_pyobject(py)?
+                .into_any())
+        }
+        "tpcds" => {
+            let dialect = dialect_text.ok_or_else(|| {
+                PyValueError::new_err("dialect_text is required for tpcds query generation")
+            })?;
+            let distributions = distribution_bytes(distributions_text)?;
+            let generated = generate_tpcds_query(&DsqgenQueryRequest {
+                query,
+                template: template_text,
+                template_name: None,
+                dialect,
+                distributions: &distributions,
+                scale_factor,
+                seed,
+                stream,
+                parameters: parameters.as_deref(),
+                log_run,
+            })
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            let params = PyDict::new(py);
+            for (name, value) in generated.parameters {
+                params.set_item(name, value)?;
+            }
+            Ok((generated.text, params).into_pyobject(py)?.into_any())
+        }
+        other => Err(PyValueError::new_err(format!(
+            "query generation is not available for benchmark {other:?}"
+        ))),
     }
-    let generated = core_generate_query(&QueryRequest {
-        query,
-        template: template_text,
-        distributions: distributions_text,
+}
+
+type StreamQuery = (String, String, Vec<(String, String)>);
+type StreamsResult = (String, Vec<(u32, Vec<StreamQuery>)>);
+
+#[pyfunction]
+#[pyo3(signature = (templates, dialect_text, distributions, scale_factor, seed = None, streams = 1, qualify = false, log_run = false))]
+#[allow(clippy::too_many_arguments)]
+fn generate_tpcds_streams(
+    templates: Vec<(String, String)>,
+    dialect_text: &str,
+    distributions: &Bound<'_, PyAny>,
+    scale_factor: f64,
+    seed: Option<i64>,
+    streams: u32,
+    qualify: bool,
+    log_run: bool,
+) -> PyResult<StreamsResult> {
+    let distributions = distribution_bytes(distributions)?;
+    let sources: Vec<TemplateSource<'_>> = templates
+        .iter()
+        .map(|(name, text)| TemplateSource { name, text })
+        .collect();
+    let output = generate_streams(&StreamsRequest {
+        templates: &sources,
+        dialect: dialect_text,
+        distributions: &distributions,
         scale_factor,
         seed,
-        stream,
-        default_params,
+        streams,
+        qualify,
+        log_run,
     })
     .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    Ok((generated.text, generated.params))
+    let streams = output
+        .streams
+        .into_iter()
+        .map(|stream| {
+            let queries = stream
+                .queries
+                .into_iter()
+                .map(|query| (query.template, query.text, query.parameters))
+                .collect();
+            (stream.stream, queries)
+        })
+        .collect();
+    Ok((output.log, streams))
 }
 
 #[pymodule]
@@ -372,5 +460,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(table_scales_py, module)?)?;
     module.add_function(wrap_pyfunction!(write_refresh, module)?)?;
     module.add_function(wrap_pyfunction!(generate_query, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_tpcds_streams, module)?)?;
     Ok(())
 }
