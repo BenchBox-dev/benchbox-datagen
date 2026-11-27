@@ -650,7 +650,7 @@ fn chance(draw: &mut Draw, numerator: u64, denominator: u64) -> bool {
 }
 
 fn pick<'a>(draw: &mut Draw, items: &[&'a str]) -> &'a str {
-    draw.pick(items)
+    *draw.pick::<&str>(items)
 }
 
 #[derive(Debug)]
@@ -802,7 +802,7 @@ impl Joined {
                 }
             } else {
                 let offset = row - self.sizes.names;
-                names.append_value(if offset.is_multiple_of(2) {
+                names.append_value(if offset & 1 == 0 {
                     "Downey Robert"
                 } else {
                     "Angelina Smith"
