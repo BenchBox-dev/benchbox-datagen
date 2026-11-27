@@ -218,28 +218,31 @@ mod tests {
 
     #[test]
     fn cancellation_is_seen_before_the_next_ready_result_is_consumed() {
+        const WINDOW: usize = 8;
         let cancel = AtomicBool::new(false);
         let produced = std::sync::atomic::AtomicUsize::new(0);
         let mut consumed = 0;
         let result = ordered(
             10_000,
             4,
-            10_000,
+            WINDOW,
             &cancel,
             || "cancelled",
             |job| {
-                produced.fetch_add(1, Ordering::Relaxed);
+                produced.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, &str>(job)
             },
             |_| {
                 consumed += 1;
-                cancel.store(true, Ordering::Relaxed);
-                thread::sleep(Duration::from_millis(50));
+                while produced.load(Ordering::SeqCst) < 2 {
+                    thread::yield_now();
+                }
+                cancel.store(true, Ordering::SeqCst);
                 Ok(())
             },
         );
         assert_eq!(result, Err("cancelled"));
         assert_eq!(consumed, 1);
-        assert!(produced.load(Ordering::Relaxed) < 10_000);
+        assert!(produced.load(Ordering::SeqCst) <= WINDOW);
     }
 }
