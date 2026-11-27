@@ -31,3 +31,13 @@ def write_tables(
     threads: int | None = None,
     parts: int = 1,
 ) -> list[FileStat]: ...
+def generate_query(
+    benchmark: str,
+    query: str,
+    template_text: str,
+    distributions_text: str,
+    scale_factor: float,
+    seed: int | None = None,
+    stream: int | None = None,
+    default_params: bool = False,
+) -> tuple[str, list[str]]: ...

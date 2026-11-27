@@ -1,6 +1,7 @@
 mod generate;
 mod output;
 mod pipeline;
+mod qgen;
 mod schema;
 mod tpcds;
 mod tpch;
@@ -19,6 +20,7 @@ use arrow::record_batch::{RecordBatch, RecordBatchReader};
 pub use benchbox_datagen_writers::Compression;
 pub use generate::KeyRange;
 pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
+pub use qgen::{GeneratedQuery, QgenError, QueryRequest, generate_query};
 
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
 
