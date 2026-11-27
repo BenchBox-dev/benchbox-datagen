@@ -210,7 +210,7 @@ def test_active_locations_equal_the_dsdgen_derived_and_dsqgen_probed_values(scal
 
 
 @pytest.mark.parametrize("scale", list(GATE))
-def test_generated_small_dimension_addresses_stay_within_the_active_locations(scale):
+def test_generated_small_dimension_addresses_cover_exactly_the_active_locations(scale):
     active = benchbox_datagen.active_locations("tpcds", float(scale))
     seen = {"city": set(), "county": set(), "state": set()}
     for table, prefix in (
@@ -224,9 +224,9 @@ def test_generated_small_dimension_addresses_stay_within_the_active_locations(sc
         ).read_all()
         for kind in seen:
             seen[kind] |= set(data[f"{prefix}_{kind}"].drop_null().to_pylist())
-    assert 0 < len(seen["city"]) <= active["active_cities"]
-    assert 0 < len(seen["county"]) <= active["active_counties"]
-    assert 0 < len(seen["state"]) <= active["active_states"]
+    assert len(seen["city"]) == active["active_cities"]
+    assert len(seen["county"]) == active["active_counties"]
+    assert len(seen["state"]) == active["active_states"]
 
 
 def test_active_locations_are_not_defined_for_tpch():
