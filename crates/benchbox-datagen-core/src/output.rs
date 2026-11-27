@@ -50,6 +50,7 @@ pub struct OutputRequest {
     pub compression: Option<Compression>,
     pub threads: Option<NonZeroUsize>,
     pub parts: i32,
+    pub seed: Option<u64>,
     pub output_dir: PathBuf,
 }
 
@@ -140,6 +141,7 @@ fn write_with(
         }
         (Format::Parquet, compression) => compression.unwrap_or_default(),
     };
+    let seed = request.benchmark.resolve_seed(request.seed)?;
     let threads = request
         .threads
         .or_else(|| thread::available_parallelism().ok())
@@ -147,6 +149,7 @@ fn write_with(
     fs::create_dir_all(&request.output_dir).map_err(|e| io_error(&request.output_dir, e))?;
     let job = TableJob {
         benchmark: request.benchmark,
+        seed,
         scale_factor: request.scale_factor,
         format: request.format,
         compression,
@@ -188,6 +191,7 @@ fn write_with(
 
 struct TableJob<'a> {
     benchmark: Benchmark,
+    seed: u64,
     scale_factor: f64,
     format: Format,
     compression: Compression,
@@ -246,7 +250,15 @@ impl TableJob<'_> {
 
     fn stream_file(&self, table: &str, part: i32, parts: i32, path: &Path) -> Result<u64, Error> {
         let file = self.create(path)?;
-        let slice = generate::part_slice(self.benchmark, table, self.scale_factor, part, parts);
+        let slice = generate::part_slice(
+            self.benchmark,
+            table,
+            self.scale_factor,
+            part,
+            parts,
+            self.seed,
+        );
+        generate::warm(&slice, self.cancel)?;
         match self.format {
             Format::Tbl => {
                 let mut sink = Cancellable {
@@ -288,7 +300,13 @@ impl TableJob<'_> {
 
     fn write_single(&self, table: &'static str) -> Result<FileStats, Error> {
         let path = file_path(self.dir, table, None, self.format);
-        let slices = generate::plan(self.benchmark, table, self.scale_factor, self.chunk_rows);
+        let slices = generate::plan(
+            self.benchmark,
+            table,
+            self.scale_factor,
+            self.chunk_rows,
+            self.seed,
+        );
         let file = self.create(&path)?;
         let window = self.buffered * 2;
         let rows = match self.format {
@@ -381,6 +399,7 @@ mod tests {
             compression: None,
             threads: NonZeroUsize::new(threads),
             parts,
+            seed: None,
             output_dir: dir.to_path_buf(),
         }
     }
@@ -600,6 +619,7 @@ mod tests {
             let cancel = AtomicBool::new(false);
             let job = TableJob {
                 benchmark: Benchmark::Tpcds,
+                seed: 0,
                 scale_factor: 1.0,
                 format,
                 compression: Compression::None,
@@ -620,7 +640,7 @@ mod tests {
                 while step.is_multiple_of(2) || step.is_multiple_of(3) {
                     step += 1;
                 }
-                assert!(generate::plan(Benchmark::Tpcds, table, 1.0, Some(step)).len() > 1);
+                assert!(generate::plan(Benchmark::Tpcds, table, 1.0, Some(step), 0).len() > 1);
                 assert_eq!(
                     write(table, format, step),
                     write(table, format, u64::MAX / 2),

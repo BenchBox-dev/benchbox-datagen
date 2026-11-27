@@ -20,6 +20,10 @@ BUDGETS = {
     ("tpcds", 1.0, "parquet"): (4.0, 1024),
     ("tpcds", 10.0, "tbl"): (30.0, 2048),
     ("tpcds", 10.0, "parquet"): (40.0, 2048),
+    ("ssb", 1.0, "tbl"): (5.0, 512),
+    ("ssb", 1.0, "parquet"): (6.0, 512),
+    ("ssb", 10.0, "tbl"): (50.0, 1024),
+    ("ssb", 10.0, "parquet"): (60.0, 1024),
 }
 
 CHILD = """
@@ -34,6 +38,22 @@ if sys.platform != "darwin":
     peak *= 1024
 print(json.dumps({"wall_s": wall, "peak_rss_mib": peak / (1 << 20), "rows": sum(s.rows for s in stats), "bytes": sum(s.bytes for s in stats)}))
 """
+
+
+def measure_driver(driver: str, scale: float, fmt: str, threads: str, workdir: Path) -> dict[str, float]:
+    out = Path(tempfile.mkdtemp(prefix="bench-", dir=workdir))
+    try:
+        started = time.monotonic()
+        process = subprocess.Popen([driver, str(scale), "42", fmt, str(out), threads])
+        _, status, usage = os.wait4(process.pid, 0)
+        wall = time.monotonic() - started
+        if status != 0:
+            raise subprocess.CalledProcessError(status, driver)
+        peak = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+        size = sum(path.stat().st_size for path in out.iterdir())
+        return {"wall_s": wall, "peak_rss_mib": peak / (1 << 20), "bytes": size}
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
 
 
 def measure(benchmark: str, scale: float, fmt: str, threads: str, workdir: Path) -> dict[str, float]:
@@ -52,12 +72,13 @@ def measure(benchmark: str, scale: float, fmt: str, threads: str, workdir: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--benchmark", choices=["tpch", "tpcds"], default="tpch")
+    parser.add_argument("--benchmark", choices=["tpch", "tpcds", "ssb"], default="tpch")
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--scales", type=float, nargs="+", default=[1.0, 10.0])
     parser.add_argument("--formats", nargs="+", default=["tbl", "parquet"])
     parser.add_argument("--threads", default="default")
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--driver")
     args = parser.parse_args()
     report: dict[str, object] = {
         "host": {
@@ -74,7 +95,10 @@ def main() -> int:
     for scale in args.scales:
         for fmt in args.formats:
             load_before = os.getloadavg()
-            runs = [measure(args.benchmark, scale, fmt, args.threads, Path(args.workdir)) for _ in range(args.runs)]
+            if args.driver:
+                runs = [measure_driver(args.driver, scale, fmt, args.threads, Path(args.workdir)) for _ in range(args.runs)]
+            else:
+                runs = [measure(args.benchmark, scale, fmt, args.threads, Path(args.workdir)) for _ in range(args.runs)]
             wall_budget, rss_budget = BUDGETS[(args.benchmark, scale, fmt)]
             wall = statistics.median(run["wall_s"] for run in runs)
             rss = statistics.median(run["peak_rss_mib"] for run in runs)

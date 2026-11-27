@@ -9,6 +9,10 @@ def load(benchmark: str) -> dict:
         from benchbox.core.tpch.benchmark import TPCHBenchmark
 
         return TPCHBenchmark(scale_factor=0.01).get_schema()
+    if benchmark == "ssb":
+        from benchbox.core.ssb.benchmark import SSBBenchmark
+
+        return SSBBenchmark(scale_factor=0.01).get_schema()
     from benchbox.core.tpcds.benchmark import TPCDSBenchmark
 
     schemas = TPCDSBenchmark(scale_factor=1.0).get_schema()
