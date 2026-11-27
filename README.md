@@ -24,7 +24,7 @@ pinned by exact version. This project does not fork them: fixes go upstream, and
 patch carried until upstream releases it is listed under
 [Carried upstream patches](#carried-upstream-patches).
 
-Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) and SSB (all five tables, any scale factor) as
+Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) SSB (all five tables, any scale factor) and `joinorder_synthetic` (all 21 tables, any scale factor) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
 `NOT NULL` columns non-nullable). Delimited output is byte-identical to the
@@ -239,6 +239,68 @@ apply `rowcount("active_x", "store")`, which is the smaller of the value and the
 are a data-dependent subset of the matching sales range, so no exact bounds exist
 without generating the returns rows; the bounds of the sales range would be only a
 superset, and are left out so that every reported range is exact.
+
+### joinorder_synthetic
+
+Tables, columns, types, value domains and the planted golden entities follow
+BenchBox's legacy `JoinOrderGenerator` (`benchbox/core/joinorder_synthetic/generator.py`,
+`random.seed(42)`, schema in `benchbox/core/joinorder/schema_specs.yaml`); only the
+random stream changed. The data is uniformly random with no real IMDb content.
+Output is comma-delimited `.csv` with no header (`Generator::text_format` is
+`TextFormat::csv(b',', false)`; a null is an empty field), as the legacy files are,
+and Parquet. Every column is `int64` or `utf8`; `id` columns are nullable in the Arrow
+schema because the legacy schema declares them so, `NOT NULL` columns are not.
+
+| Table | Rows at scale factor `SF` |
+| :--- | :--- |
+| `kind_type`, `company_type`, `info_type`, `role_type`, `comp_cast_type`, `link_type` | 7, 4, 24, 12, 4, 18 (constant; the legacy `info_type` holds 24 rows although its row-count table says 113) |
+| `title` | `trunc(500,000 * SF) + 60` |
+| `name` | `trunc(800,000 * SF) + 60` |
+| `company_name` | `trunc(60,000 * SF) + 60` |
+| `keyword` | `trunc(24,000 * SF) + 60` |
+| `char_name` | `trunc(600,000 * SF)` |
+| `cast_info` | `trunc(7,000,000 * SF)` |
+| `movie_companies` | `trunc(520,000 * SF)` |
+| `movie_info` | `trunc(3,000,000 * SF)` |
+| `movie_info_idx` | `trunc(280,000 * SF)` |
+| `movie_keyword` | `trunc(1,000,000 * SF)` |
+| `movie_link` | `trunc(6,000 * SF)` |
+| `person_info` | `trunc(600,000 * SF)` |
+| `complete_cast` | `trunc(30,000 * SF)` |
+| `aka_name` | `trunc(180,000 * SF)` |
+| `aka_title` | `trunc(80,000 * SF)` |
+
+Every `trunc` is at least 1. Row counts are closed-form in `SF` and never depend on
+the seed. The legacy scale options are 0.01, 0.1, 0.5, 1 and 2 with no upper bound.
+
+The four entity tables end with 60 planted golden rows (ids `trunc(base * SF) + 1`
+onward) that the benchmark queries target. As in legacy, the first 60 rows of
+`cast_info`, `movie_companies`, `movie_info`, `movie_keyword`, `movie_link`,
+`complete_cast` and `aka_name` are rewritten to point at them (a fixed function of
+the row index, so blocks stay independent); the random foreign keys of every other row
+draw uniformly from `1..trunc(base * SF)`, so the golden rows are never drawn by chance.
+Probabilities that legacy draws as floats (`random() < 0.30`) are exact integer ratios
+(`below(1000) < 300`). The `movie_info_idx` rating (`uniform(1, 10)` formatted `%.1f`) is
+drawn as an integer number of tenths with the same bucket weights (1.0 and 10.0 have
+half the weight of the others).
+
+Known legacy properties kept as they are: `person_info.info_type_id` draws from
+`1..113` while `info_type` has 24 rows, so about 79% of its rows reference no
+`info_type` row; `cast_info.person_role_id` is null in 30% of rows; many columns
+(`imdb_index`, `imdb_id`, `*_pcode_*`, `md5sum`, ...) are always null. The acceptance
+config therefore declares no foreign key for `person_info.info_type_id` and none
+for the nullable `title.episode_of_id`, `aka_title.episode_of_id` and
+`cast_info.person_role_id` (the orphan check cannot tell a null from an orphan).
+Every benchmark query is an ungrouped `MIN(...)` aggregate, so it returns exactly one
+row even when no data matches; row counts cannot show an empty result for this
+benchmark, and the one-row result is all `NULL` in that case.
+
+`tools/synthetic_acceptance.py joinorder_synthetic ...` (config in
+`tools/synthetic_configs/joinorder_synthetic.py`) produces the comparison with 5
+legacy seeds (the legacy generator is seeded by replacing its module-level
+`random` with a `random.Random(seed)`), the key checks and the 113-query
+DuckDB/DataFusion agreement that gate the frozen goldens in
+`crates/benchbox-datagen-core/tests/joinorder_synthetic.rs`.
 
 ## Adding a synthetic generator
 
