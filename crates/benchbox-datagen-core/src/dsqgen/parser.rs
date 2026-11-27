@@ -4,6 +4,7 @@ use std::rc::Rc;
 use super::DsqgenError;
 use super::eval::Val;
 use super::lexer::{Kw, Tok, Token, lex};
+use crate::tpcds_update::REFRESH_SCALE_GRID;
 
 pub(crate) const SUFFIX_LIST: u8 = 1;
 pub(crate) const SUFFIX_ULIST: u8 = 2;
@@ -19,7 +20,10 @@ const GLOBAL_NAMES: [(&str, Kw); 8] = [
     ("_LIMITB", Kw::LimitB),
     ("_LIMITC", Kw::LimitC),
 ];
-const SCALE_VOLUMES: [i64; 9] = [1, 10, 100, 300, 1000, 3000, 10_000, 30_000, 100_000];
+const MAX_DEPTH: usize = 64;
+const MAX_LIST: i64 = 10_000;
+const MAX_USES: usize = 10_000;
+const MAX_SUBSTITUTIONS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Func {
@@ -56,15 +60,23 @@ pub(crate) struct Expr {
     pub(crate) suffix: u8,
     pub(crate) value_count: usize,
     pub(crate) perm_slot: usize,
+    depth: usize,
 }
 
 impl Expr {
     fn new(kind: ExprKind) -> Self {
+        let depth = match &kind {
+            ExprKind::Func { args, .. } | ExprKind::Arith { args, .. } => {
+                1 + args.iter().map(|arg| arg.depth).max().unwrap_or(0)
+            }
+            _ => 1,
+        };
         Self {
             kind,
             suffix: 0,
             value_count: 1,
             perm_slot: 0,
+            depth,
         }
     }
 }
@@ -179,7 +191,7 @@ impl Template {
             .chars()
             .take_while(char::is_ascii_digit)
             .collect();
-        let uses = digits.parse::<usize>().unwrap_or(0).max(1);
+        let uses = digits.parse::<usize>().unwrap_or(0).clamp(1, MAX_USES);
         if uses > arena.subs[found].n_use {
             arena.subs[found].n_use = uses;
         }
@@ -206,6 +218,7 @@ struct Parser<'a> {
     arena: &'a mut Arena,
     template: Template,
     env: &'a Environment<'a>,
+    depth: usize,
 }
 
 fn syntax(line: u32, message: impl Into<String>) -> DsqgenError {
@@ -234,6 +247,7 @@ pub(crate) fn parse_template(
             warnings: 0,
         },
         env,
+        depth: 0,
     };
     parser.workload()?;
     let Parser {
@@ -369,6 +383,9 @@ impl Parser<'_> {
         match self.next()? {
             Tok::Id(name) => {
                 self.expect_char('=')?;
+                if self.template.order.len() >= MAX_SUBSTITUTIONS {
+                    return Err(syntax(line, "the template defines too many substitutions"));
+                }
                 let expr = self.expr()?;
                 self.expect_char(';')?;
                 self.template.define(self.arena, name, expr);
@@ -430,7 +447,7 @@ impl Parser<'_> {
             .last_mut()
             .ok_or_else(|| syntax(line, "the template has no segments"))?;
         segment.sub = Some(id);
-        segment.use_index = suffix - i64::from(listed);
+        segment.use_index = suffix.wrapping_sub(i64::from(listed));
         segment.count = uses;
         Ok(())
     }
@@ -519,11 +536,9 @@ impl Parser<'_> {
                 _ => return Ok(left),
             };
             self.at += 1;
+            let line = self.line();
             let right = self.term()?;
-            left = Expr::new(ExprKind::Arith {
-                op,
-                args: vec![left, right],
-            });
+            left = Self::arithmetic(line, op, left, right)?;
         }
     }
 
@@ -536,16 +551,35 @@ impl Parser<'_> {
                 _ => return Ok(left),
             };
             self.at += 1;
+            let line = self.line();
             let right = self.factor()?;
-            left = Expr::new(ExprKind::Arith {
-                op,
-                args: vec![left, right],
-            });
+            left = Self::arithmetic(line, op, left, right)?;
         }
+    }
+
+    fn arithmetic(line: u32, op: Op, left: Expr, right: Expr) -> Result<Expr, DsqgenError> {
+        let expr = Expr::new(ExprKind::Arith {
+            op,
+            args: vec![left, right],
+        });
+        if expr.depth > MAX_DEPTH {
+            return Err(syntax(line, "expressions nest too deeply"));
+        }
+        Ok(expr)
     }
 
     fn factor(&mut self) -> Result<Expr, DsqgenError> {
         let line = self.line();
+        if self.depth >= MAX_DEPTH {
+            return Err(syntax(line, "expressions nest too deeply"));
+        }
+        self.depth += 1;
+        let outcome = self.factor_at_depth(line);
+        self.depth -= 1;
+        outcome
+    }
+
+    fn factor_at_depth(&mut self, line: u32) -> Result<Expr, DsqgenError> {
         match self.next()? {
             Tok::Literal(text) => Ok(Expr::new(ExprKind::Str(text))),
             Tok::Int(value) => Ok(Expr::new(ExprKind::Int(value))),
@@ -612,6 +646,13 @@ impl Parser<'_> {
         }
     }
 
+    fn function_expr(line: u32, expr: Expr) -> Result<Expr, DsqgenError> {
+        if expr.depth > MAX_DEPTH {
+            return Err(syntax(line, "expressions nest too deeply"));
+        }
+        Ok(expr)
+    }
+
     fn arg_count(line: u32, args: &[Expr], wanted: usize) -> Result<(), DsqgenError> {
         if args.len() == wanted {
             Ok(())
@@ -637,7 +678,7 @@ impl Parser<'_> {
                 let args = self.comma_list(!matches!(kw, Kw::Date | Kw::Random))?;
                 self.expect_char(')')?;
                 Self::arg_count(line, &args, 3)?;
-                Ok(Expr::new(ExprKind::Func { func, args }))
+                Self::function_expr(line, Expr::new(ExprKind::Func { func, args }))
             }
             Kw::Text => {
                 self.expect_char('(')?;
@@ -657,17 +698,22 @@ impl Parser<'_> {
                 if args.len() > MAX_ARGS {
                     return Err(syntax(line, "too many arguments"));
                 }
-                Ok(Expr::new(ExprKind::Func {
-                    func: Func::Text,
-                    args,
-                }))
+                Self::function_expr(
+                    line,
+                    Expr::new(ExprKind::Func {
+                        func: Func::Text,
+                        args,
+                    }),
+                )
             }
             Kw::Rowcount => self.rowcount(line),
             Kw::ScaleStep => {
                 self.expect_char('(')?;
                 self.expect_char(')')?;
                 let target = self.scale_integer();
-                let slot = SCALE_VOLUMES.iter().position(|volume| target <= *volume);
+                let slot = REFRESH_SCALE_GRID
+                    .iter()
+                    .position(|volume| target <= i64::from(*volume));
                 Ok(Expr::new(ExprKind::Int(
                     slot.map_or(9, |slot| slot as i64) + 1,
                 )))
@@ -682,8 +728,13 @@ impl Parser<'_> {
                     return Err(syntax(line, "list modifiers apply to function calls only"));
                 };
                 args.push(Expr::new(ExprKind::Int(count)));
-                let count = usize::try_from(count)
-                    .map_err(|_| syntax(line, "a list size cannot be negative"))?;
+                if !(0..=MAX_LIST).contains(&count) {
+                    return Err(syntax(
+                        line,
+                        format!("a list size must be between 0 and {MAX_LIST}"),
+                    ));
+                }
+                let count = count as usize;
                 match kw {
                     Kw::UList => {
                         expr.value_count = count;

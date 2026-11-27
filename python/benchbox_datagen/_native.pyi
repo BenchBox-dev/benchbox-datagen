@@ -62,17 +62,17 @@ def generate_query(
     scale_factor: float,
     seed: int | None = None,
     stream: int | None = None,
-    default_params: bool = False,
+    default_params: Literal[False] = False,
     *,
     dialect_text: str,
     parameters: Sequence[tuple[str, str]] | None = None,
-) -> tuple[str, dict[str, str]]: ...
+) -> tuple[str, dict[str, str], bool]: ...
 def generate_tpcds_streams(
     templates: Sequence[tuple[str, str]],
     dialect_text: str,
-    distributions: bytes,
+    distributions: bytes | str,
     scale_factor: float,
     seed: int | None = None,
     streams: int = 1,
     qualify: bool = False,
-) -> tuple[str, list[tuple[int, list[tuple[str, str, list[tuple[str, str]]]]]]]: ...
+) -> tuple[str, list[tuple[int, list[tuple[str, str, list[tuple[str, str]], bool]]]]]: ...

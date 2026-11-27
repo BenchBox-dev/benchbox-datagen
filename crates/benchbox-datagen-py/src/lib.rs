@@ -369,6 +369,11 @@ fn generate_query<'py>(
                 .into_any())
         }
         "tpcds" => {
+            if default_params {
+                return Err(PyValueError::new_err(
+                    "default_params is not supported for tpcds query generation",
+                ));
+            }
             let dialect = dialect_text.ok_or_else(|| {
                 PyValueError::new_err("dialect_text is required for tpcds query generation")
             })?;
@@ -389,7 +394,9 @@ fn generate_query<'py>(
             for (name, value) in generated.parameters {
                 params.set_item(name, value)?;
             }
-            Ok((generated.text, params).into_pyobject(py)?.into_any())
+            Ok((generated.text, params, generated.wrapped)
+                .into_pyobject(py)?
+                .into_any())
         }
         other => Err(PyValueError::new_err(format!(
             "query generation is not available for benchmark {other:?}"
@@ -397,7 +404,7 @@ fn generate_query<'py>(
     }
 }
 
-type StreamQuery = (String, String, Vec<(String, String)>);
+type StreamQuery = (String, String, Vec<(String, String)>, bool);
 type StreamsResult = (String, Vec<(u32, Vec<StreamQuery>)>);
 
 #[pyfunction]
@@ -434,7 +441,7 @@ fn generate_tpcds_streams(
             let queries = stream
                 .queries
                 .into_iter()
-                .map(|query| (query.template, query.text, query.parameters))
+                .map(|query| (query.template, query.text, query.parameters, query.wrapped))
                 .collect();
             (stream.stream, queries)
         })

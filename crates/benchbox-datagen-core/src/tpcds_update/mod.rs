@@ -19,7 +19,8 @@ use ctx::{Ctx, Run};
 
 pub(crate) use rng::DEFAULT_SEED;
 
-const REFRESH_SCALE_GRID: [u32; 9] = [1, 10, 100, 300, 1000, 3000, 10_000, 30_000, 100_000];
+pub(crate) const REFRESH_SCALE_GRID: [u32; 9] =
+    [1, 10, 100, 300, 1000, 3000, 10_000, 30_000, 100_000];
 
 pub(crate) fn validate_refresh_scale(scale_factor: f64) -> Result<(), Error> {
     let on_grid = scale_factor < 1.0

@@ -23,7 +23,7 @@ pub enum DsqgenError {
     #[error("seed {0} is outside the supported range 0..=2147483646")]
     SeedOutOfRange(i64),
     #[error(
-        "scale factor must be finite and positive, and below 100000 (TPC-DS scale factors of 1 or more must be whole numbers)"
+        "scale factor must be finite and positive, and at most 100000 (TPC-DS scale factors of 1 or more must be whole numbers)"
     )]
     InvalidScale,
     #[error("malformed distribution index: {0}")]
@@ -40,6 +40,8 @@ pub enum DsqgenError {
     InvalidParameterName(String),
     #[error("at least one template and one stream are required")]
     NothingToGenerate,
+    #[error("stream number {0} is too large")]
+    StreamOutOfRange(u32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -167,7 +169,7 @@ pub fn generate_streams(request: &StreamsRequest<'_>) -> Result<StreamsOutput, D
     let count = request.templates.len();
     let mut order: Vec<u32> = (0..count as u32).collect();
     let mut log = Some(String::new());
-    let mut streams = Vec::with_capacity(request.streams as usize);
+    let mut streams = Vec::new();
     for stream in 0..request.streams {
         run.reset_permutation_rng(PERMUTATION_SEED);
         run.shuffle_order(&mut order)?;
@@ -342,7 +344,11 @@ fn split_query_id(query: &str) -> Result<(u32, Option<char>), DsqgenError> {
 pub fn generate_query(request: &DsqgenQueryRequest<'_>) -> Result<DsqgenQuery, DsqgenError> {
     let (number, variant) = split_query_id(request.query)?;
     let multi_part = MULTI_PART_QUERIES.contains(&number) && variant.is_some();
-    let default_name = format!("query{number}.tpl");
+    let kept_variant = variant.filter(|_| !multi_part);
+    let default_name = format!(
+        "query{number}{}.tpl",
+        kept_variant.map(String::from).unwrap_or_default()
+    );
     let template_name = request.template_name.unwrap_or(&default_name);
     let rewritten;
     let template = match request.parameters {
@@ -351,6 +357,12 @@ pub fn generate_query(request: &DsqgenQueryRequest<'_>) -> Result<DsqgenQuery, D
             rewritten.as_str()
         }
         None => request.template,
+    };
+    let streams = match request.stream {
+        Some(stream) => stream
+            .checked_add(1)
+            .ok_or(DsqgenError::StreamOutOfRange(stream))?,
+        None => 1,
     };
     let output = generate_streams(&StreamsRequest {
         templates: &[TemplateSource {
@@ -361,7 +373,7 @@ pub fn generate_query(request: &DsqgenQueryRequest<'_>) -> Result<DsqgenQuery, D
         distributions: request.distributions,
         scale_factor: request.scale_factor,
         seed: request.seed,
-        streams: request.stream.map_or(1, |stream| stream + 1),
+        streams,
         qualify: false,
     })?;
     let last = output

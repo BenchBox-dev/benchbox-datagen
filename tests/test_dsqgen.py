@@ -59,7 +59,7 @@ def test_single_template_records_replay(inputs):
     for record in records(inputs, "tpcds_single"):
         if record.get("s") or checked >= 1500:
             continue
-        text, params = benchbox_datagen.generate_query(
+        text, params, _ = benchbox_datagen.generate_query(
             "tpcds",
             record["q"],
             template(inputs, record["q"], record["sf"]),
@@ -77,7 +77,7 @@ def test_single_template_records_replay(inputs):
 def test_explicit_parameter_records_replay(inputs):
     checked = 0
     for record in records(inputs, "tpcds_explicit"):
-        text, _ = benchbox_datagen.generate_query(
+        text, _, _ = benchbox_datagen.generate_query(
             "tpcds",
             record["q"],
             template(inputs, record["q"], record["sf"]),
@@ -100,7 +100,7 @@ def test_streams_follow_the_template_permutation(inputs):
     )
     assert [stream for stream, _ in streams] == [0, 1]
     assert all(len(queries) == 99 for _, queries in streams)
-    assert streams[0][1][0][0] != streams[1][1][0][0] or streams[0][1] != streams[1][1]
+    assert [query[0] for query in streams[0][1]] != [query[0] for query in streams[1][1]]
     assert log.startswith("BEGIN STREAM 0\nTemplate: ")
 
 
@@ -119,4 +119,24 @@ def test_malformed_inputs_are_errors(inputs):
     with pytest.raises(ValueError):
         benchbox_datagen.generate_query(
             "tpcds", "1", good, inputs["idx"], 1.0, seed=1, dialect_text=inputs["dialect"], parameters=[("NOPE.01", "x")]
+        )
+
+
+def test_wrapped_is_reported_and_inputs_are_validated(inputs):
+    _, _, wrapped = benchbox_datagen.generate_query(
+        "tpcds", "46", template(inputs, "46", 1.0), inputs["idx"], 1.0, seed=1, dialect_text=inputs["dialect"]
+    )
+    assert wrapped
+    _, _, plain = benchbox_datagen.generate_query(
+        "tpcds", "46", template(inputs, "46", 100.0), inputs["idx"], 100.0, seed=1, dialect_text=inputs["dialect"]
+    )
+    assert not plain
+    _, streams = benchbox_datagen.generate_tpcds_streams(
+        [("query46.tpl", template(inputs, "46", 1.0))], inputs["dialect"], inputs["idx"], 1.0, seed=1
+    )
+    assert streams[0][1][0][3]
+    with pytest.raises(ValueError, match="default_params"):
+        benchbox_datagen.generate_query(
+            "tpcds", "46", template(inputs, "46", 1.0), inputs["idx"], 1.0, seed=1,
+            default_params=True, dialect_text=inputs["dialect"],
         )

@@ -102,7 +102,15 @@ impl Inputs {
 }
 
 fn checkout() -> Option<PathBuf> {
-    std::env::var_os("BENCHBOX_CHECKOUT").map(PathBuf::from)
+    let root = std::env::var_os("BENCHBOX_CHECKOUT").map(PathBuf::from);
+    if root.is_none() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "BENCHBOX_CHECKOUT is required in CI for the TPC-DS corpus replay"
+        );
+        eprintln!("BENCHBOX_CHECKOUT is not set; skipping the TPC-DS corpus replay");
+    }
+    root
 }
 
 fn read_records(directory: &Path, stem: &str) -> Vec<Value> {
@@ -423,6 +431,10 @@ fn replays_explicit_parameter_records() {
         let rewritten = substitute_parameters(&template, &parameters, query);
         let explicit = inputs.single(query, seed, scale, None, Some(&parameters));
         let alternate = inputs.single(query, Some(99), scale, None, Some(&parameters));
+        let wrapped = matches!(seeded, Ok((_, _, true)));
+        let round_trip = record.get("r").and_then(Value::as_str).is_none_or(
+            |round_trip| matches!(&seeded, Ok((text, _, _)) if digest(text) == round_trip),
+        );
         let results = [
             matches!(&rewritten, Ok(text) if digest(text) == record["t"].as_str().unwrap()),
             matches!(&explicit, Ok((text, _, _)) if digest(text) == record["h"].as_str().unwrap()),
@@ -430,27 +442,26 @@ fn replays_explicit_parameter_records() {
                 .get("h_alt")
                 .and_then(Value::as_str)
                 .is_none_or(|alt| matches!(&alternate, Ok((text, _, _)) if digest(text) == alt)),
-            record.get("r").and_then(Value::as_str).is_none_or(
-                |round_trip| matches!(&seeded, Ok((text, _, _)) if digest(text) == round_trip),
-            ),
         ];
-        if matches!(seeded, Ok((_, _, true))) {
-            tally.exclude(results.iter().all(|ok| *ok));
-            continue;
-        }
-        for (ok, what) in results.iter().zip([
-            "rewritten template",
-            "explicit text",
-            "alternate-seed text",
-            "seeded text",
-        ]) {
+        for (ok, what) in
+            results
+                .iter()
+                .zip(["rewritten template", "explicit text", "alternate-seed text"])
+        {
             tally.check(*ok, || {
                 format!("q{query} seed {seed:?} sf {scale}: {what} differs")
             });
         }
+        if wrapped {
+            tally.exclude(round_trip);
+        } else {
+            tally.check(round_trip, || {
+                format!("q{query} seed {seed:?} sf {scale}: seeded text differs")
+            });
+        }
     }
     eprintln!(
-        "explicit: {} records, checks matched {}, records excluded {} (would match anyway: {})",
+        "explicit: {} records, checks matched {}, seeded round-trip checks excluded {} (would match anyway: {})",
         records.len(),
         tally.matched,
         tally.excluded,

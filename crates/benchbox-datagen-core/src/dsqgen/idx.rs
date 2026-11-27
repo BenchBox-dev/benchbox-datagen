@@ -5,6 +5,7 @@ use super::DsqgenError;
 const NAME_LEN: usize = 20;
 const ENTRY_LEN: usize = NAME_LEN + 7 * 4;
 pub(crate) const TYPE_INT: i32 = 7;
+const MAX_WIDTH: usize = 1024;
 
 #[derive(Debug, Clone)]
 struct Entry {
@@ -123,6 +124,26 @@ impl<'a> DistIndex<'a> {
                 .ok_or_else(|| malformed(format!("distribution {} is truncated", entry.name)))?;
             Ok(start)
         };
+        if entry.value_width > MAX_WIDTH
+            || entry.weight_width > MAX_WIDTH
+            || entry.length > bytes.len() / 4
+        {
+            return Err(malformed(format!(
+                "distribution {} has an implausible size",
+                entry.name
+            )));
+        }
+        let cells = entry
+            .value_width
+            .checked_add(entry.weight_width)
+            .and_then(|columns| columns.checked_mul(entry.length))
+            .and_then(|cells| cells.checked_add(entry.value_width))
+            .ok_or_else(|| malformed(format!("distribution {} is truncated", entry.name)))?;
+        cells
+            .checked_mul(4)
+            .and_then(|len| entry.offset.checked_add(len))
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| malformed(format!("distribution {} is truncated", entry.name)))?;
         let types_at = take(entry.value_width)?;
         let types = (0..entry.value_width)
             .map(|slot| read_i32(bytes, types_at + slot * 4))
@@ -134,7 +155,9 @@ impl<'a> DistIndex<'a> {
             let mut running = 0_i64;
             let mut cumulative = Vec::with_capacity(entry.length);
             for row in 0..entry.length {
-                running += i64::from(read_i32(bytes, at + row * 4)?);
+                running = running
+                    .checked_add(i64::from(read_i32(bytes, at + row * 4)?))
+                    .ok_or_else(|| malformed("a weight total overflows"))?;
                 cumulative.push(running);
             }
             maxima.push(running);

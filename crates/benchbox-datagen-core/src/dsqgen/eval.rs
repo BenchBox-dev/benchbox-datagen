@@ -13,6 +13,8 @@ const DIST_UNIFORM: i64 = 1;
 const DIST_SALES: i64 = 3;
 const DIST_RETURNS: i64 = 5;
 const MAX_ARGS: usize = 20;
+const MAX_EVAL_DEPTH: usize = 128;
+const MAX_VALUES: usize = 1_000_000;
 const CALENDAR: &str = "calendar";
 
 type Generated = (String, Vec<(String, String)>, bool);
@@ -56,6 +58,7 @@ pub(crate) struct Run<'a, 'b> {
     current: usize,
     template_name: String,
     wrapped: bool,
+    depth: usize,
 }
 
 fn evaluation(message: impl Into<String>) -> DsqgenError {
@@ -74,7 +77,7 @@ fn atoi(text: &str) -> i64 {
 }
 
 fn key_uniform(rng: &mut Rng, min: i64, max: i64) -> Result<i64, DsqgenError> {
-    let span = (max - min + 1) as i32;
+    let span = max.wrapping_sub(min).wrapping_add(1) as i32;
     if span == 0 {
         return Err(evaluation("a random range has no values"));
     }
@@ -83,10 +86,10 @@ fn key_uniform(rng: &mut Rng, min: i64, max: i64) -> Result<i64, DsqgenError> {
 }
 
 fn integer_uniform(rng: &mut Rng, min: i64, max: i64) -> Result<i64, DsqgenError> {
-    if max - min + 1 == 0 {
-        return Err(evaluation("a random range has no values"));
+    match max.checked_sub(min).and_then(|width| width.checked_add(1)) {
+        Some(span) if span != 0 => Ok(rng.integer(min, span)),
+        _ => Err(evaluation("a random range has no values")),
     }
-    Ok(rng.integer(min, max))
 }
 
 impl<'a, 'b> Run<'a, 'b> {
@@ -105,6 +108,7 @@ impl<'a, 'b> Run<'a, 'b> {
             current: 0,
             template_name: String::new(),
             wrapped: false,
+            depth: 0,
         }
     }
 
@@ -138,10 +142,16 @@ impl<'a, 'b> Run<'a, 'b> {
             log.push_str(&format!("Template: {}\n", self.template_name));
         }
         if !self.initialised[template] {
+            let mut total = 0_usize;
+            for id in &self.templates[template].order {
+                total = total
+                    .checked_add(value_count(&self.arena.subs[*id])?)
+                    .filter(|total| *total <= MAX_VALUES)
+                    .ok_or_else(|| evaluation("the template substitutions hold too many values"))?;
+            }
             for id in self.templates[template].order.clone() {
                 let sub = &mut self.arena.subs[id];
-                let count = sub.n_use.max(1) * sub.n_parts.max(1);
-                sub.vals = vec![Val::default(); count];
+                sub.vals = vec![Val::default(); value_count(sub)?];
             }
             self.initialised[template] = true;
         }
@@ -150,7 +160,7 @@ impl<'a, 'b> Run<'a, 'b> {
         while position < self.templates[template].order.len() {
             let id = self.templates[template].order[position];
             let sub = &mut self.arena.subs[id];
-            let count = sub.n_use.max(1) * sub.n_parts.max(1);
+            let count = value_count(sub)?;
             if sub.vals.len() != count {
                 sub.vals = vec![Val::default(); count];
             }
@@ -180,13 +190,16 @@ impl<'a, 'b> Run<'a, 'b> {
             text.push_str(&segment.text);
             if let Some(id) = segment.sub {
                 let sub = &self.arena.subs[id];
-                let index = sub.n_parts as i64 * segment.count as i64 + segment.use_index;
-                let val = usize::try_from(index)
+                let index = i64::try_from(sub.n_parts)
                     .ok()
+                    .and_then(|parts| parts.checked_mul(segment.count as i64))
+                    .and_then(|index| index.checked_add(segment.use_index));
+                let val = index
+                    .and_then(|index| usize::try_from(index).ok())
                     .and_then(|index| sub.vals.get(index))
                     .ok_or_else(|| {
                         evaluation(format!(
-                            "substitution {} has no value at position {index}",
+                            "substitution {} has no value at position {index:?}",
                             sub.name
                         ))
                     })?;
@@ -215,6 +228,22 @@ impl<'a, 'b> Run<'a, 'b> {
     }
 
     fn eval_expr(
+        &mut self,
+        expr: &Expr,
+        out: &mut [Val],
+        is_param: bool,
+        query: i64,
+    ) -> Result<(), DsqgenError> {
+        if self.depth >= MAX_EVAL_DEPTH {
+            return Err(evaluation("template expressions nest too deeply"));
+        }
+        self.depth += 1;
+        let outcome = self.eval_expr_at_depth(expr, out, is_param, query);
+        self.depth -= 1;
+        outcome
+    }
+
+    fn eval_expr_at_depth(
         &mut self,
         expr: &Expr,
         out: &mut [Val],
@@ -376,7 +405,10 @@ impl<'a, 'b> Run<'a, 'b> {
             ExprKind::Repl { weight, .. } => *weight,
             _ => 0,
         };
-        let total: i64 = args.iter().map(weight).sum();
+        let total = args
+            .iter()
+            .try_fold(0_i64, |total, arg| total.checked_add(weight(arg)))
+            .ok_or_else(|| evaluation("the text() weights overflow"))?;
         let mut level = integer_uniform(&mut self.rng, 1, total)?;
         for arg in args {
             if level <= weight(arg) {
@@ -385,7 +417,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 }
                 return Ok(());
             }
-            level -= weight(arg);
+            level = level.wrapping_sub(weight(arg));
         }
         Err(evaluation("text() ran past its replacements"))
     }
@@ -480,7 +512,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 if is_param {
                     return Err(evaluation("a list cannot be a function argument"));
                 }
-                let span = (max - min + 1) as i32;
+                let span = max.wrapping_sub(min).wrapping_add(1) as i32;
                 for index in 0..params[3].n.max(0) as usize {
                     let drawn = key_uniform(&mut self.rng, min, max)?;
                     let slot = out
@@ -494,17 +526,21 @@ impl<'a, 'b> Run<'a, 'b> {
                 if is_param {
                     return Err(evaluation("a list cannot be a function argument"));
                 }
-                let size = max - min + 1;
-                if size <= 0 {
-                    return Err(evaluation("a unique list has no values to permute"));
-                }
+                let size = max
+                    .checked_sub(min)
+                    .and_then(|width| width.checked_add(1))
+                    .filter(|size| *size > 0)
+                    .ok_or_else(|| evaluation("a unique list has no values to permute"))?;
                 let slot = expr.perm_slot;
                 if self.permutations.len() <= slot {
                     self.permutations
                         .resize_with(slot + 1, || Permutation::Empty);
                 }
                 if matches!(self.permutations[slot], Permutation::Empty) {
-                    self.permutations[slot] = Permutation::Keys(KeyPermutation::new(size as u64));
+                    self.permutations[slot] =
+                        Permutation::Keys(KeyPermutation::new(size as u64).ok_or_else(|| {
+                            evaluation("the key range of a unique list is not supported")
+                        })?);
                 }
                 let Permutation::Keys(keys) = &mut self.permutations[slot] else {
                     return Err(evaluation("a permutation slot was reused"));
@@ -512,7 +548,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 keys.shuffle(&mut self.rng);
                 let count = params[3].n.max(0) as u64;
                 let held = keys.size();
-                if count > held {
+                if count > held && held > 1 {
                     self.wrapped = true;
                 }
                 for index in 0..count {
@@ -520,7 +556,7 @@ impl<'a, 'b> Run<'a, 'b> {
                     let target = out
                         .get_mut(index as usize)
                         .ok_or_else(|| evaluation("a list is larger than its substitution"))?;
-                    target.n = (entry as i64 % size) + min;
+                    target.n = (entry as i64 % size).wrapping_add(min);
                     target.use_int = true;
                 }
             }
@@ -676,6 +712,14 @@ impl<'a, 'b> Run<'a, 'b> {
         }
         Ok(())
     }
+}
+
+fn value_count(sub: &super::parser::Sub) -> Result<usize, DsqgenError> {
+    sub.n_use
+        .max(1)
+        .checked_mul(sub.n_parts.max(1))
+        .filter(|count| *count <= MAX_VALUES)
+        .ok_or_else(|| evaluation(format!("substitution {} holds too many values", sub.name)))
 }
 
 fn eval_arithmetic(op: Op, params: &[Val], out: &mut Val) -> Result<(), DsqgenError> {

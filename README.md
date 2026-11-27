@@ -229,13 +229,13 @@ binary instead of the Python module).
 `generate_query("tpcds", ...)` and `generate_tpcds_streams(...)` are a Rust port of `dsqgen`. They interpret
 the template language over BenchBox-supplied inputs only: the `.tpl` templates, the dialect template
 (`netezza.tpl` is the only one BenchBox reaches) and the `tpcds.idx` distribution index, all passed at call
-time. Nothing TPC-authored is committed here beyond the language keywords, the scale-slot volumes, which are names and numbers, not distributions or query text. `rowcount()` comes
+time. The port is TPC-derived code (`dsqgen/*.rs` follow the TPC-DS kit's `keywords.c`, `scaling.c`, `eval.c`, `genrand.c`, `permute.c` and `dsqgen` sources line by line), and it ships under the TPC legal notice in `THIRD_PARTY_LICENSES`; the files are listed in the table of generated and TPC-derived files under TPC-DS refresh sets. No TPC distribution file, template or query text is committed here. `rowcount()` comes
 from the library scale model (sub-scale rules and `active_locations` included). `parameters=` renders explicit
 values the way `DSQGenBinary.generate_with_parameters` does (it rewrites `[NAME.n]` tokens, then runs a seeded
 dsqgen). The sub-SF1 `query93.tpl` override stays with the caller, as in BenchBox.
 
 `tests/dsqgen_corpus.rs` replays the TPC-DS shards of the BenchBox query corpus (`tpcds_single`,
-`tpcds_stream_template`, `tpcds_stream_all`, `tpcds_explicit`, plus the manifest's Q34 `-LOG`/plain cases) against
+`tpcds_stream_template`, `tpcds_stream_all` and `tpcds_explicit`) against
 the pinned `BENCHBOX_REF` checkout. `range()` and `list`/`ulist` on `text()` and `date()` are rejected with an error:
 no BenchBox template uses them.
 
@@ -247,23 +247,23 @@ reads `n` entries with `getPermutationEntry`. When `rowcount()` makes the permut
 the `malloc`ed array, so its output depends on glibc heap contents (the Q34 `-LOG` versus plain difference in the BenchBox
 corpus). The library defines this case: entry `i` is entry `i % size`, so the shortest permutation repeats in order. The result is
 deterministic on every platform and scale, identical across streams and runs for the same seed, and equal to C when the
-permutation holds one key (the value is always the minimum). `GeneratedStatement::wrapped` and `DsqgenQuery::wrapped` report that
-a draw wrapped.
+permutation holds one key (the value is always the minimum).
 
-Affected (query, scale factor) cells, with permutation size `n` against the requested count `k`:
+A cell is affected wherever the available key count `n` is at least 2 and below the list length `k`. With `n` of 1 the value is always the minimum, so the wrap changes nothing and `wrapped` stays false. `n` follows `rowcount(...)` in the template, so it depends on the scale factor.
+
+Examples, generated over the `dsdgen` scale grid (1, 10, 100, 300, 1000, 3000, 10000, 30000 and 100000), with `n` in brackets:
 
 | Query | k | Scale factors (n) |
 | :--- | ---: | :--- |
-| 16 | 5 | 0.01-5, 20 (1), 6-9, 30 (2), 10, 50, 500, 5000 (3), 200 (4) |
-| 27, 27a | 6 | 0.01-5, 20 (1), 6-9, 30, 5000 (2), 10, 50, 200, 500 (3), 2000 (5) |
-| 34, 73 | 8 | 0.01-5, 20 (1), 6-9, 30 (2), 10, 50 (3), 200, 500 (4) |
-| 36 | 8 | as 27 |
-| 46 | 5 | 0.01-0.5 (1), 1-3 (2), 4, 5, 20 (3), 6, 7, 30 (4) |
-| 68 | 2 | 0.01-0.5 (1) |
+| 16 | 5 | 10 (3) |
+| 27, 27a | 6 | 10 (3) |
+| 34, 73 | 8 | 10 (3) |
+| 36 | 8 | 10 (3) |
+| 46 | 5 | 1 (2) |
 
-Other scale factors (100, 300, 1000, 3000, 10000 and above) are unaffected. The corpus replay computes the affected records from the
-template and the scale model (the `wrapped` flag), not from a list, and excludes exactly those; every other record matches. The C
-tool's values for the excluded records with `n` of 2 or more are not reproduced.
+No other query is affected on the grid. Scale factors off the grid vary: the API accepts any whole scale factor up to 100000, and for example Q16 at SF 6-9 (2), 50 (3), 200 (4), Q27, Q27a and Q36 at SF 6-9 (2), 2000 (5), 20000 (5), Q46 at SF 4 (3) and 7 (4) are affected too, so do not read the table as a list of every affected scale factor. `GeneratedStatement::wrapped` and `DsqgenQuery::wrapped` (the third element of `generate_query("tpcds", ...)`, the fourth of each `generate_tpcds_streams` query) say whether a draw wrapped.
+
+The corpus replay takes the flag from the template and the scale model, not from a list. It excludes exactly the flagged cells; every other record matches. In `tpcds_explicit` only the seeded round-trip check is skipped for a flagged record, and the rewritten-template, explicit-text and alternate-seed checks still run. The C tool's values for flagged cells are not reproduced.
 
 **qgen (TPC-H).** `qgen` seed 0 for Q7 and Q12 raises an error (the distinct-value draw never terminates in C), and a missing seed
 requires `default_params=True` because `qgen`'s time-based seeding is not reproducible. BenchBox fails fast for seed 0 (PR #4558).
@@ -324,6 +324,14 @@ this table):
 | `crates/benchbox-datagen-core/src/tpcds_update/rng.rs` | Random-stream seeding by column number ported from `dsdgen` |
 | `crates/benchbox-datagen-core/src/tpcds_update/out.rs` | Field formatting of `dsdgen`'s row printers |
 | `crates/benchbox-datagen-core/src/tpcds_update/mod.rs` | Refresh-set file layout and delete files ported from `dsdgen` |
+| `crates/benchbox-datagen-core/src/dsqgen/lexer.rs` | The `dsqgen` keyword table (`keywords.c` `KeyWords[]`, all 37 entries in order) and the template tokenizer, ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/parser.rs` | The query template grammar (`qgen.y`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/eval.rs` | Template expression evaluation (`EvalRandomExpr` and its helpers in `eval.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/rng.rs` | The random-number stream, `genrand_key`, `genrand_integer` and `makeKeyPermutation` (`genrand.c`, `permute.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/idx.rs` | The reader for the `tpcds.idx` distribution index format (`dist.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/date.rs` | Date parsing, Julian-day and calendar routines (`date.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/mod.rs` | `dsqgen` stream generation, template ordering and seeding (`qgen_main.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/qgen.rs` | `qgen` query parameter generation and the TPC-H query defaults, ported from the TPC-H kit |
 | `tests/data/tpcds_refresh_sha256.json` | SHA-256 of the files written by the bundled `dsdgen -update` at scale factors 0.0001, 0.01 (sets 1 and 127), 1 (sets 1 to 7, plus `-rngseed 20260709`), 10 and 100 |
 | `tests/data/tpch_refresh_sf0.01_sha256.json` | SHA-256 of the files written by the bundled `dbgen -U` |
 
@@ -342,4 +350,4 @@ about 200 changed lines, is pinned by commit SHA and is never merged into a dive
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The files derived from the TPC kits (`tpcds_update/*.rs`, `dsqgen/*.rs` and `qgen.rs`) ship under the TPC legal notice in `THIRD_PARTY_LICENSES`.
