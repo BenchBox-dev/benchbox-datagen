@@ -2,6 +2,7 @@ pub(crate) mod calendar;
 pub(crate) mod delimited;
 pub(crate) mod rng;
 mod ssb;
+mod tpch_skew;
 
 use std::fmt;
 use std::io::{self, Write};
@@ -66,6 +67,7 @@ pub(crate) trait Generator: Sync {
 #[rustfmt::skip]
 const REGISTRY: &[&dyn Generator] = &[
     &ssb::Ssb,
+    &tpch_skew::TpchSkew,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

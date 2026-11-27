@@ -1,0 +1,79 @@
+{
+ "customer": [
+  ["c_custkey", "int64", false],
+  ["c_name", "string", false],
+  ["c_address", "string", false],
+  ["c_nationkey", "int64", false],
+  ["c_phone", "string", false],
+  ["c_acctbal", "decimal128(15, 2)", false],
+  ["c_mktsegment", "string", false],
+  ["c_comment", "string", false]
+ ],
+ "lineitem": [
+  ["l_orderkey", "int64", false],
+  ["l_partkey", "int64", false],
+  ["l_suppkey", "int64", false],
+  ["l_linenumber", "int64", false],
+  ["l_quantity", "decimal128(15, 2)", false],
+  ["l_extendedprice", "decimal128(15, 2)", false],
+  ["l_discount", "decimal128(15, 2)", false],
+  ["l_tax", "decimal128(15, 2)", false],
+  ["l_returnflag", "string", false],
+  ["l_linestatus", "string", false],
+  ["l_shipdate", "date32[day]", false],
+  ["l_commitdate", "date32[day]", false],
+  ["l_receiptdate", "date32[day]", false],
+  ["l_shipinstruct", "string", false],
+  ["l_shipmode", "string", false],
+  ["l_comment", "string", false]
+ ],
+ "nation": [
+  ["n_nationkey", "int64", false],
+  ["n_name", "string", false],
+  ["n_regionkey", "int64", false],
+  ["n_comment", "string", true]
+ ],
+ "orders": [
+  ["o_orderkey", "int64", false],
+  ["o_custkey", "int64", false],
+  ["o_orderstatus", "string", false],
+  ["o_totalprice", "decimal128(15, 2)", false],
+  ["o_orderdate", "date32[day]", false],
+  ["o_orderpriority", "string", false],
+  ["o_clerk", "string", false],
+  ["o_shippriority", "int64", false],
+  ["o_comment", "string", false]
+ ],
+ "part": [
+  ["p_partkey", "int64", false],
+  ["p_name", "string", false],
+  ["p_mfgr", "string", false],
+  ["p_brand", "string", false],
+  ["p_type", "string", false],
+  ["p_size", "int64", false],
+  ["p_container", "string", false],
+  ["p_retailprice", "decimal128(15, 2)", false],
+  ["p_comment", "string", false]
+ ],
+ "partsupp": [
+  ["ps_partkey", "int64", false],
+  ["ps_suppkey", "int64", false],
+  ["ps_availqty", "int64", false],
+  ["ps_supplycost", "decimal128(15, 2)", false],
+  ["ps_comment", "string", false]
+ ],
+ "region": [
+  ["r_regionkey", "int64", false],
+  ["r_name", "string", false],
+  ["r_comment", "string", true]
+ ],
+ "supplier": [
+  ["s_suppkey", "int64", false],
+  ["s_name", "string", false],
+  ["s_address", "string", false],
+  ["s_nationkey", "int64", false],
+  ["s_phone", "string", false],
+  ["s_acctbal", "decimal128(15, 2)", false],
+  ["s_comment", "string", false]
+ ]
+}
