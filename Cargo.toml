@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/benchbox-datagen-core", "crates/benchbox-datagen-py"]
+members = ["crates/benchbox-datagen-core", "crates/benchbox-datagen-py", "crates/benchbox-datagen-writers"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,9 @@ repository = "https://github.com/BenchBox-dev/benchbox-datagen"
 [workspace.dependencies]
 arrow = { version = "60", default-features = false }
 benchbox-datagen-core = { path = "crates/benchbox-datagen-core" }
+benchbox-datagen-writers = { path = "crates/benchbox-datagen-writers" }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "flate2-zlib-rs"] }
+tempfile = "3"
 pyo3 = { version = "0.30", features = ["abi3-py311"] }
 pyo3-arrow = "0.21"
 thiserror = "2"

@@ -9,9 +9,14 @@ repository.workspace = true
 
 [dependencies]
 arrow.workspace = true
+parquet.workspace = true
+benchbox-datagen-writers.workspace = true
 thiserror.workspace = true
 tpchgen.workspace = true
 tpchgen-arrow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
