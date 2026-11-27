@@ -649,8 +649,8 @@ fn chance(draw: &mut Draw, numerator: u64, denominator: u64) -> bool {
     draw.below(denominator) < numerator
 }
 
-fn pick<'a>(draw: &mut Draw, items: &[&'a str]) -> &'a str {
-    *draw.pick::<&str>(items)
+fn pick<'a>(draw: &mut Draw, items: &'a [&str]) -> &'a str {
+    draw.pick::<&str>(items)
 }
 
 #[derive(Debug)]
