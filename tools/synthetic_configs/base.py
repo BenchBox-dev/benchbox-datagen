@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 Column = tuple[str, str]
+SEEDS = list(range(42, 47))
+EXTENDED_SEEDS = list(range(42, 72))
 
 
 @dataclass(frozen=True)
@@ -31,8 +33,10 @@ class SyntheticConfig:
     shared_domains: dict[str, SharedDomain] = field(default_factory=dict)
     row_digests: dict[str, str] = field(default_factory=dict)
     expected_query_rows: Callable[[float], dict[str, object]] | None = None
-    seeds: list[int] = field(default_factory=lambda: list(range(42, 47)))
-    extended_seeds: list[int] = field(default_factory=lambda: list(range(42, 72)))
+    legacy_suffix: str = "tbl"
+    legacy_delimiter: str = "|"
+    legacy_header: bool = False
+    schema_path: Path | None = None
     distribution_scales: tuple[float, ...] = (0.1, 1.0)
     query_scales: tuple[float, ...] = (0.01, 0.1, 1.0)
     verify_scales: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0)
@@ -43,12 +47,14 @@ class SyntheticConfig:
             raise ValueError(f"{self.name}: every exclusion needs a written reason")
         if set(self.primary_keys) != set(self.tables):
             raise ValueError(f"{self.name}: primary_keys must cover exactly the tables")
-        if self.seeds != self.extended_seeds[: len(self.seeds)]:
-            raise ValueError(f"{self.name}: extended_seeds must extend seeds")
+        if not self.legacy_delimiter or len(self.legacy_delimiter) != 1:
+            raise ValueError(f"{self.name}: legacy_delimiter must be one character")
+        if not self.legacy_suffix.strip():
+            raise ValueError(f"{self.name}: legacy_suffix must name the legacy file extension")
 
     @property
     def schema_file(self) -> Path:
-        return ROOT / "tests" / "data" / f"{self.name}_arrow_schemas.json"
+        return self.schema_path or ROOT / "tests" / "data" / f"{self.name}_arrow_schemas.json"
 
     def schemas(self) -> dict[str, list[list]]:
         return json.loads(self.schema_file.read_text())

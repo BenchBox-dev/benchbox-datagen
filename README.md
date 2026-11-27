@@ -124,10 +124,32 @@ the output and is a generator version bump that refreezes the golden hashes.
   ranges (blocks are sliced at the range edges), so concatenating the part
   files reproduces the single file byte for byte. Small dimension tables
   (`ssb.date`) are never split.
-- **Text output.** `.tbl` is `|`-separated with a `\n` line end, no trailing
-  delimiter, nulls empty and dates as `YYYY-MM-DD`. Parquet carries the same
-  Arrow types as the BenchBox schema dump (`tests/data/<benchmark>_arrow_schemas.json`,
-  refreshed with `tools/dump_benchbox_schemas.py <benchmark>`).
+- **Text output.** One text form per Arrow type, shared by every synthetic
+  generator (the SSB bytes are unchanged). Lines end in `\n`; a null is an empty
+  field. A table declares its delimited-text properties once (`Generator::text_format`):
+  the delimiter (default `|`), a header row (default none) and the file
+  extension (default `tbl`; the CSV preset is `csv`, with RFC 4180 quoting of
+  fields that contain the delimiter, a quote or a newline, and `""` for an empty
+  string so it differs from a null). A header is written on the first part only, so
+  concatenating the parts still reproduces the single file. Nothing else is
+  per-generator code.
+
+  | Arrow type | Text | Legacy evidence |
+  | :--- | :--- | :--- |
+  | `int32`, `int64` | plain decimal | all eight generators |
+  | `date32` | `YYYY-MM-DD` | `strftime("%Y-%m-%d")`, `date.isoformat()` in `amplab`, `clickbench`, `coffeeshop`, `tpch_skew` |
+  | `timestamp[us]` | `YYYY-MM-DD HH:MM:SS`, plus `.ffffff` only when the microseconds are not zero (Python `str(datetime)`) | `strftime("%Y-%m-%d %H:%M:%S")` in `h2odb`, `tsbs_devops`, `clickbench` |
+  | `float`, `double` | shortest round-trip digits in Python `repr` layout (`0.1`, `1.0`, `1e-05`, `1e+16`, `nan`, `inf`) | `h2odb` and `amplab` write Python floats through `csv`/`str` |
+  | fixed-scale `double` (`Kind::Fixed(n)`) | `n` decimals (`1.50`) | `tsbs_devops` metrics and `coffeeshop` prices use `f"{x:.2f}"` |
+  | `decimal128(p, s)` | exactly `s` decimals, `-0.05`, no exponent | TPC-H style `dbgen` decimals; `h2odb`, `coffeeshop`, `amplab` declare `DECIMAL` columns |
+  | `bool` | `true` / `false` | no legacy generator among the eight writes one; the form every target engine accepts |
+  | `fixed_size_list<float>[n]` | `[v1,v2,...]`, each element `%.6g` | `vector_search._array_to_csv` (`f"{v:.6g}"` joined by `,`) |
+  | `utf8` | raw bytes | all |
+
+  Any other Arrow type (unsigned or 8/16-bit integers, other timestamp units or
+  time zones, negative decimal scales, lists of other types) is reported as an
+  error before the first byte is written. Parquet needs no text form and
+  carries every type natively; it is round-trip tested for all of them.
 - **Seeds.** A `u64` (`0` to `2**64 - 1`; Python raises `ValueError` outside that range), default 42. Row counts never depend on the seed.
 
 ### SSB
@@ -181,10 +203,27 @@ on 30 seeds per side (42-71) at that scale: the library fails only if its
 empty-seed count is higher than legacy's with one-sided Fisher exact p < 0.001
 (5 against 5 seeds cannot reach that p-value).
 
+The seeds are fixed in `tools/synthetic_configs/base.py` (`SEEDS` = 42-46 and
+`EXTENDED_SEEDS` = 42-71, the 99.9% interval constant is the Student t value for
+those 4 degrees of freedom); a config cannot change them.
+
+Every Arrow kind has a statistic. Each column is reduced to one number per row,
+then summarised by null rate, distinct ratio, mean and the 1/25/50/75/99%
+quantiles: strings by their length; integers, floats, decimals as the value;
+booleans as 0/1; dates and timestamps as microseconds since the epoch
+(`epoch_us`); vectors (`fixed_size_list<float>[n]`) as the population standard
+deviation of their components, which pins the dimension and normalisation
+without being sensitive to the sign pattern. Arrow type names are normalised
+(`date32[day]` is `date32`) and an unmapped type raises `ValueError` rather than
+being skipped. Legacy files are read by the config's `legacy_suffix` (default
+`tbl`), `legacy_delimiter` (default `|`) and `legacy_header` (default false);
+`tests/test_synthetic_acceptance_types.py` runs the whole statistic and compare
+path on a CSV/Parquet fixture that has every kind.
+
 ## Adding a synthetic generator
 
-A synthetic generator is one Rust module plus one registry entry, one Python
-config file and one schema file; nothing else is edited.
+A synthetic generator is one Rust module plus one registry entry (one line),
+one Python config file and one schema file; nothing else is edited.
 
 1. **Module.** Add `crates/benchbox-datagen-core/src/synthetic/<name>.rs` with a
    unit struct that implements `synthetic::Generator`: `name`, `tables`,
@@ -193,9 +232,25 @@ config file and one schema file; nothing else is edited.
    pure function of the block index and the seed), `key_ranges`, and, only when
    the defaults are wrong, `splittable` (default: every table splits) and
    `table_scales` (default: `id_count == source_rows == row_count`). Refresh
-   sets are unsupported for every synthetic benchmark.
+   sets are unsupported for every synthetic benchmark. Column types come from
+   `schema::Kind` (`Int`, `Int32`, `Decimal`, `Decimal128`, `Float32`,
+   `Float64`, `Fixed`, `Bool`, `Timestamp`, `Date`, `Text`, `Vector`); a table whose
+   legacy files are not `|`-separated `.tbl` overrides `text_format` (see Text
+   output above).
+
+   **Row counts and key ranges are closed-form functions of the scale
+   factor, not of the seed**: `row_count`, `key_ranges` and `table_scales` take
+   no seed, and a part is a row range of a fixed-size table. A table whose
+   child count varies per parent (SSB's 1-7 `lineorder` lines per order,
+   coffeeshop's `order_lines`) follows SSB: the table has a fixed row count
+   (the legacy mean times the scale), the cursor that assigns rows to parents
+   is seeded, and the order-structure columns are listed in the config's
+   `exclusions` with a reason because legacy and library differ there by
+   construction.
 2. **Registry.** In `synthetic/mod.rs` add `mod <name>;` and append
-   `&<name>::<Struct>` to `REGISTRY`. This is the only shared line; Python
+   `&<name>::<Struct>` to `REGISTRY`. The registry is one entry per line, so
+   parallel additions merge mechanically (the `mod` lines and the entries are the
+   only shared lines, and a conflict there is resolved by keeping both); Python
    names, `table_names`, `row_counts`, `table_scales`, `key_ranges`, the seed
    default, `write_tables` and `generate_table` all follow from it.
 3. **Schema file.** Add `tests/data/<name>_arrow_schemas.json`, produced with

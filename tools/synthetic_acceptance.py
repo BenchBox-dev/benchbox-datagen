@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -13,11 +14,25 @@ from pathlib import Path
 import duckdb
 
 import synthetic_configs
+from synthetic_configs.base import EXTENDED_SEEDS, SEEDS
 
 CONFIG = None
 QUANTILES = [0.01, 0.25, 0.5, 0.75, 0.99]
 METRICS = ["null_rate", "distinct_ratio", "mean", "p1", "p25", "p50", "p75", "p99"]
 T_99_9_FOUR_DF = 8.610
+assert len(SEEDS) == 5
+SCALAR_TYPES = {
+    "int32": "INTEGER",
+    "int64": "BIGINT",
+    "string": "VARCHAR",
+    "float": "FLOAT",
+    "double": "DOUBLE",
+    "bool": "BOOLEAN",
+    "date32": "DATE",
+    "date32[day]": "DATE",
+    "timestamp[us]": "TIMESTAMP",
+}
+VECTOR_KIND = re.compile(r"fixed_size_list<item: float>\[(\d+)\]$")
 QUANTILE_METRICS = {"p1": 0.01, "p25": 0.25, "p50": 0.5, "p75": 0.75, "p99": 0.99}
 CDF_MAX_DISTINCT = 5000
 RANK_SIGMAS = 5.0
@@ -33,14 +48,37 @@ def schemas() -> dict[str, list[list]]:
     return CONFIG.schemas()
 
 
+def kind_of(table: str, column: str) -> str:
+    return {name: kind for name, kind, _ in schemas()[table]}[column]
+
+
 def tbl_type(kind: str) -> str:
     if kind.startswith("decimal128("):
         return "DECIMAL" + kind.removeprefix("decimal128").replace(" ", "")
-    return TBL_TYPES[kind]
+    if vector := VECTOR_KIND.match(kind):
+        return f"FLOAT[{vector.group(1)}]"
+    if kind not in SCALAR_TYPES:
+        raise ValueError(f"unsupported Arrow type {kind!r}")
+    return SCALAR_TYPES[kind]
 
 
 def is_text(table: str, column: str) -> bool:
-    return {name: kind for name, kind, _ in schemas()[table]}[column] == "string"
+    return kind_of(table, column) == "string"
+
+
+def column_measure(table: str, column: str) -> str:
+    duck_type = tbl_type(kind_of(table, column))
+    if duck_type == "VARCHAR":
+        return f"length({column})"
+    if duck_type == "DATE":
+        return f"epoch_us({column}::TIMESTAMP)::DOUBLE"
+    if duck_type == "TIMESTAMP":
+        return f"epoch_us({column})::DOUBLE"
+    if duck_type == "BOOLEAN":
+        return f"{column}::INTEGER::DOUBLE"
+    if duck_type.startswith("FLOAT["):
+        return f"list_aggregate({column}::FLOAT[], 'stddev_pop')::DOUBLE"
+    return f"{column}::DOUBLE"
 
 
 def column_stats(
@@ -58,7 +96,7 @@ def _column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str, colum
     schema = [column for column in schemas()[table] if column[0] in columns]
     selects = []
     for name, _, _ in schema:
-        measure = f"length({name})" if is_text(table, name) else f"{name}::DOUBLE"
+        measure = column_measure(table, name)
         selects += [
             f"count({name})",
             f"count(DISTINCT {name})",
@@ -80,7 +118,7 @@ def _column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str, colum
         }
         if entry["text"] and distinct <= 64:
             entry["values"] = [r[0] for r in con.execute(f"SELECT DISTINCT {name} FROM {source} ORDER BY 1").fetchall()]
-        measure = f"length({name})" if entry["text"] else f"{name}::DOUBLE"
+        measure = column_measure(table, name)
         if entry["text"] or distinct <= CDF_MAX_DISTINCT:
             running, cdf = 0, []
             for value, count in con.execute(
@@ -101,12 +139,14 @@ def parquet_sources(directory: Path) -> dict[str, str]:
     return {table: f"read_parquet('{directory / (table + '.parquet')}')" for table in tables()}
 
 
-def tbl_sources(directory: Path) -> dict[str, str]:
+def legacy_sources(directory: Path) -> dict[str, str]:
     sources = {}
+    header = "true" if CONFIG.legacy_header else "false"
     for table in tables():
         columns = ", ".join(f"'{name}': '{tbl_type(kind)}'" for name, kind, _ in schemas()[table])
+        path = directory / f"{table}.{CONFIG.legacy_suffix}"
         sources[table] = (
-            f"read_csv('{directory / (table + '.tbl')}', delim='|', header=false, columns={{{columns}}})"
+            f"read_csv('{path}', delim='{CONFIG.legacy_delimiter}', header={header}, columns={{{columns}}})"
         )
     return sources
 
@@ -118,9 +158,11 @@ def run_legacy(scale_factor: float, seed: int, workdir: Path, queries_only: bool
         CONFIG.legacy_generate(scale_factor, seed, out)
         seconds = time.monotonic() - started
         if queries_only:
-            return {"seed": seed, "generate_seconds": seconds, "query_rows": query_row_counts(tbl_sources(out))}
-        stats = table_stats(duckdb.connect(config={"threads": 4, "memory_limit": "2GB"}), tbl_sources(out), legacy=True)
-        sources = tbl_sources(out)
+            return {"seed": seed, "generate_seconds": seconds, "query_rows": query_row_counts(legacy_sources(out))}
+        stats = table_stats(
+            duckdb.connect(config={"threads": 4, "memory_limit": "2GB"}), legacy_sources(out), legacy=True
+        )
+        sources = legacy_sources(out)
         return {
             "seed": seed,
             "generate_seconds": seconds,
@@ -312,11 +354,11 @@ def seed_rows(base: dict, extra: dict | None, query_id: str, seeds: list[int]) -
 def query_rule(legacy: dict, library: dict, legacy_extra: dict | None = None, library_extra: dict | None = None) -> dict[str, dict]:
     result = {}
     for query_id in legacy["runs"][0]["query_rows"]:
-        legacy_rows = seed_rows(legacy, None, query_id, CONFIG.seeds)
-        library_rows = seed_rows(library, None, query_id, CONFIG.seeds)
+        legacy_rows = seed_rows(legacy, None, query_id, SEEDS)
+        library_rows = seed_rows(library, None, query_id, SEEDS)
         if any(n == 0 for n in legacy_rows):
-            legacy_rows = seed_rows(legacy, legacy_extra, query_id, CONFIG.extended_seeds)
-            library_rows = seed_rows(library, library_extra, query_id, CONFIG.extended_seeds)
+            legacy_rows = seed_rows(legacy, legacy_extra, query_id, EXTENDED_SEEDS)
+            library_rows = seed_rows(library, library_extra, query_id, EXTENDED_SEEDS)
         result[query_id] = {
             "seeds": len(legacy_rows),
             "legacy": legacy_rows,
@@ -450,8 +492,8 @@ def sf_name(scale: float) -> str:
 def cmd_report(args: argparse.Namespace) -> None:
     base = Path(args.dir)
     scales = CONFIG.verify_scales
-    first, last = CONFIG.seeds[0], CONFIG.seeds[-1]
-    extended_last = CONFIG.extended_seeds[-1]
+    first, last = SEEDS[0], SEEDS[-1]
+    extended_last = EXTENDED_SEEDS[-1]
     seed_range = f"{first}-{last}"
     queries = len(CONFIG.query_texts())
     lines = [f"### Row counts and referential integrity (seed {first})", ""]
@@ -468,7 +510,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         lines.append(
             f"| {sf_name(scale)} | {counts} | {sum(verify['orphans'].values())} | {sum(verify['duplicates'].values())} | {'yes' if agree else 'NO'} |"
         )
-    lines += ["", f"### Distribution comparison with {len(CONFIG.seeds)} legacy seeds ({seed_range})", ""]
+    lines += ["", f"### Distribution comparison with {len(SEEDS)} legacy seeds ({seed_range})", ""]
     lines += ["| SF | library seed | in legacy range | in 99.9% prediction interval | rank-equivalent quantile | excluded | outside |", "|---|---|---|---|---|---|---|"]
     details = []
     excluded = {}
@@ -567,7 +609,7 @@ def main() -> None:
     CONFIG = synthetic_configs.load(args.benchmark)
     for option in ("seeds", "seed"):
         if hasattr(args, option) and getattr(args, option) is None:
-            setattr(args, option, CONFIG.seeds if option == "seeds" else CONFIG.seeds[0])
+            setattr(args, option, SEEDS if option == "seeds" else SEEDS[0])
     args.handler(args)
 
 

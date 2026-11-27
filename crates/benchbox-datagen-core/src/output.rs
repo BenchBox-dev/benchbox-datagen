@@ -86,10 +86,20 @@ fn writer_error(path: &Path, error: WriterError) -> Error {
     }
 }
 
-fn file_path(dir: &Path, table: &str, part: Option<i32>, format: Format) -> PathBuf {
+fn file_path(
+    dir: &Path,
+    benchmark: Benchmark,
+    table: &str,
+    part: Option<i32>,
+    format: Format,
+) -> PathBuf {
+    let extension = match format {
+        Format::Tbl => generate::delimited_extension(benchmark, table),
+        Format::Parquet => format.name(),
+    };
     match part {
-        None => dir.join(format!("{table}.{}", format.name())),
-        Some(part) => dir.join(format!("{table}.{}.{part}", format.name())),
+        None => dir.join(format!("{table}.{extension}")),
+        Some(part) => dir.join(format!("{table}.{extension}.{part}")),
     }
 }
 
@@ -227,7 +237,7 @@ impl TableJob<'_> {
             || Error::Cancelled,
             |index| {
                 let part = index as i32 + 1;
-                let path = file_path(self.dir, table, Some(part), self.format);
+                let path = file_path(self.dir, self.benchmark, table, Some(part), self.format);
                 let rows = self.stream_file(table, part, parts, &path)?;
                 self.stats(table, path, rows)
             },
@@ -299,7 +309,7 @@ impl TableJob<'_> {
     }
 
     fn write_single(&self, table: &'static str) -> Result<FileStats, Error> {
-        let path = file_path(self.dir, table, None, self.format);
+        let path = file_path(self.dir, self.benchmark, table, None, self.format);
         let slices = generate::plan(
             self.benchmark,
             table,

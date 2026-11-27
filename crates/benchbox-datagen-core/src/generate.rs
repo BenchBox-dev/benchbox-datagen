@@ -64,10 +64,24 @@ pub(crate) fn write_delimited<W: Write>(
         (Benchmark::Tpcds, Slice::Tpcds(range)) => {
             tpcds::write_delimited(table, scale_factor, range.clone(), sink)
         }
-        (Benchmark::Synthetic(_), Slice::Synthetic { table, rows }) => {
-            synthetic::write_delimited(table, rows.start, rows.end, sink)
+        (
+            Benchmark::Synthetic(id),
+            Slice::Synthetic {
+                table: source,
+                rows,
+            },
+        ) => {
+            let format = id.generator().text_format(table);
+            synthetic::write_delimited(source, &format, rows.start, rows.end, sink)
         }
         _ => unreachable!("slices are built for their own benchmark"),
+    }
+}
+
+pub(crate) fn delimited_extension(benchmark: Benchmark, table: &str) -> &'static str {
+    match benchmark {
+        Benchmark::Synthetic(id) => id.generator().text_format(table).extension,
+        Benchmark::Tpch | Benchmark::Tpcds => "tbl",
     }
 }
 

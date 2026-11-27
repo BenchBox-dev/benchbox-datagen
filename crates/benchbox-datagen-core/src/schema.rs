@@ -1,28 +1,48 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 
-#[derive(Clone, Copy)]
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Kind {
     Int,
+    Int32,
     Decimal,
+    Decimal128(u8, i8),
+    Float32,
+    Float64,
+    Fixed(u8),
+    Bool,
+    Timestamp,
     Date,
     Text,
+    Vector(i32),
 }
 
 impl Kind {
     fn data_type(self) -> DataType {
         match self {
             Kind::Int => DataType::Int64,
+            Kind::Int32 => DataType::Int32,
             Kind::Decimal => DataType::Decimal128(15, 2),
+            Kind::Decimal128(precision, scale) => DataType::Decimal128(precision, scale),
+            Kind::Float32 => DataType::Float32,
+            Kind::Float64 | Kind::Fixed(_) => DataType::Float64,
+            Kind::Bool => DataType::Boolean,
+            Kind::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, None),
             Kind::Date => DataType::Date32,
             Kind::Text => DataType::Utf8,
+            Kind::Vector(dimensions) => DataType::FixedSizeList(
+                Arc::new(Field::new_list_field(DataType::Float32, true)),
+                dimensions,
+            ),
         }
     }
 }
 
-pub(crate) use Kind::{Date, Decimal, Int, Text};
+#[allow(unused_imports)]
+pub(crate) use Kind::*;
 
 pub(crate) type Column = (&'static str, Kind, bool);
 
@@ -129,6 +149,17 @@ const TPCH: [(&str, &[Column]); 8] = [
         ],
     ),
 ];
+
+#[allow(dead_code)]
+pub(crate) fn fixed_scales(columns: &[Column]) -> Vec<(&'static str, u8)> {
+    columns
+        .iter()
+        .filter_map(|(name, kind, _)| match kind {
+            Kind::Fixed(scale) => Some((*name, *scale)),
+            _ => None,
+        })
+        .collect()
+}
 
 pub(crate) fn build(tables: &[(&'static str, &[Column])]) -> HashMap<&'static str, SchemaRef> {
     tables
