@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use benchbox_datagen_core::{
-    Benchmark, Error, FileStats, OutputRequest, QueryRequest, TableRequest,
+    Benchmark, Error, FileStats, OutputRequest, QueryRequest, TableRequest, active_locations,
     generate_query as core_generate_query, key_ranges, record_batches, row_counts_cancellable,
     table_scales, write_benchmark_cancellable, write_refresh_sets,
 };
@@ -266,6 +266,23 @@ fn table_scales_py<'py>(
     Ok(result)
 }
 
+#[pyfunction(name = "active_locations")]
+fn active_locations_py<'py>(
+    py: Python<'py>,
+    benchmark: &str,
+    scale_factor: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
+    let active = py
+        .detach(|| active_locations(benchmark, scale_factor))
+        .map_err(value_error)?;
+    let result = PyDict::new(py);
+    result.set_item("active_cities", active.cities)?;
+    result.set_item("active_counties", active.counties)?;
+    result.set_item("active_states", active.states)?;
+    Ok(result)
+}
+
 #[pyfunction(name = "key_ranges")]
 fn key_ranges_py<'py>(
     py: Python<'py>,
@@ -332,6 +349,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(write_tables, module)?)?;
     module.add_function(wrap_pyfunction!(row_counts_py, module)?)?;
     module.add_function(wrap_pyfunction!(key_ranges_py, module)?)?;
+    module.add_function(wrap_pyfunction!(active_locations_py, module)?)?;
     module.add_function(wrap_pyfunction!(table_scales_py, module)?)?;
     module.add_function(wrap_pyfunction!(write_refresh, module)?)?;
     module.add_function(wrap_pyfunction!(generate_query, module)?)?;
