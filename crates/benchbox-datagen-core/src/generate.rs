@@ -1,21 +1,31 @@
 use std::io::{self, Write};
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use arrow::datatypes::SchemaRef;
 
+use crate::synthetic::{self, Table};
 use crate::{BatchReader, Benchmark, Error, pipeline, schema, tpcds, tpch};
 
 #[derive(Debug, Clone)]
 pub(crate) enum Slice {
-    Tpch { part: i32, parts: i32 },
+    Tpch {
+        part: i32,
+        parts: i32,
+    },
     Tpcds(RangeInclusive<u64>),
+    Ssb {
+        table: Arc<dyn Table>,
+        rows: Range<u64>,
+    },
 }
 
 pub(crate) fn schema(benchmark: Benchmark, table: &str) -> SchemaRef {
     match benchmark {
         Benchmark::Tpch => schema::tpch(table),
         Benchmark::Tpcds => schema::tpcds(table),
+        Benchmark::Ssb => schema::ssb(table),
     }
     .expect("every table of every benchmark has a schema")
 }
@@ -32,6 +42,9 @@ pub(crate) fn batches(
         }
         (Benchmark::Tpcds, Slice::Tpcds(range)) => {
             tpcds::batches(table, scale_factor, range.clone())
+        }
+        (Benchmark::Ssb, Slice::Ssb { table, rows }) => {
+            Box::new(synthetic::Reader::new(table.clone(), rows.start, rows.end))
         }
         _ => unreachable!("slices are built for their own benchmark"),
     }
@@ -51,6 +64,9 @@ pub(crate) fn write_delimited<W: Write>(
         (Benchmark::Tpcds, Slice::Tpcds(range)) => {
             tpcds::write_delimited(table, scale_factor, range.clone(), sink)
         }
+        (Benchmark::Ssb, Slice::Ssb { table, rows }) => {
+            synthetic::write_delimited(table, rows.start, rows.end, sink)
+        }
         _ => unreachable!("slices are built for their own benchmark"),
     }
 }
@@ -61,10 +77,38 @@ pub(crate) fn part_slice(
     scale_factor: f64,
     part: i32,
     parts: i32,
+    seed: u64,
 ) -> Slice {
     match benchmark {
         Benchmark::Tpch => Slice::Tpch { part, parts },
         Benchmark::Tpcds => Slice::Tpcds(tpcds::part_range(table, scale_factor, part, parts)),
+        Benchmark::Ssb => {
+            let source = synthetic::open(benchmark, table, scale_factor, seed);
+            let (start, end) = if synthetic::splittable(table) {
+                synthetic::part_rows(source.rows(), part, parts)
+            } else if part == 1 {
+                (0, source.rows())
+            } else {
+                (0, 0)
+            };
+            Slice::Ssb {
+                table: source,
+                rows: start..end,
+            }
+        }
+    }
+}
+
+pub(crate) fn warm(slice: &Slice, cancel: &AtomicBool) -> Result<(), Error> {
+    match slice {
+        Slice::Ssb { table, rows } if rows.start < rows.end => {
+            if table.warm(rows.start / synthetic::BLOCK_ROWS, cancel) {
+                Ok(())
+            } else {
+                Err(Error::Cancelled)
+            }
+        }
+        _ => Ok(()),
     }
 }
 
@@ -72,6 +116,7 @@ pub(crate) fn splittable(benchmark: Benchmark, table: &str, scale_factor: f64) -
     match benchmark {
         Benchmark::Tpch => !matches!(table, "nation" | "region"),
         Benchmark::Tpcds => tpcds::splittable(table, scale_factor),
+        Benchmark::Ssb => synthetic::splittable(table),
     }
 }
 
@@ -80,6 +125,7 @@ pub(crate) fn plan(
     table: &str,
     scale_factor: f64,
     chunk_rows: Option<u64>,
+    seed: u64,
 ) -> Vec<Slice> {
     match benchmark {
         Benchmark::Tpch => {
@@ -110,6 +156,21 @@ pub(crate) fn plan(
                 slices.push(Slice::Tpcds(RangeInclusive::new(1, 0)));
             }
             slices
+        }
+        Benchmark::Ssb => {
+            let source = synthetic::open(benchmark, table, scale_factor, seed);
+            let total = source.rows();
+            let step = chunk_rows
+                .map_or(synthetic::BLOCK_ROWS, |rows| {
+                    rows.max(1).div_ceil(synthetic::BLOCK_ROWS) * synthetic::BLOCK_ROWS
+                })
+                .max(1);
+            (0..total.div_ceil(step))
+                .map(|index| Slice::Ssb {
+                    table: source.clone(),
+                    rows: index * step..((index + 1) * step).min(total),
+                })
+                .collect()
         }
     }
 }
@@ -143,6 +204,14 @@ pub(crate) fn table_scales(benchmark: Benchmark, scale_factor: f64) -> Vec<Table
                 id_count: tpcds::id_count(table, scale_factor),
                 source_rows: tpcds::source_rows(table, scale_factor),
             },
+            Benchmark::Ssb => {
+                let rows = synthetic::row_count(benchmark, table, scale_factor);
+                TableScale {
+                    table,
+                    id_count: rows,
+                    source_rows: rows,
+                }
+            }
         })
         .collect()
 }
@@ -160,6 +229,7 @@ pub(crate) fn row_counts(
             let rows = match benchmark {
                 Benchmark::Tpch => tpch::row_count(table, scale_factor),
                 Benchmark::Tpcds => tpcds_row_count(table, scale_factor, workers, cancel)?,
+                Benchmark::Ssb => synthetic::row_count(benchmark, table, scale_factor),
             };
             Ok((*table, rows))
         })
@@ -184,7 +254,7 @@ fn tpcds_row_count(
     if !generated {
         return Ok(tpcds::source_rows(table, scale_factor));
     }
-    let slices = plan(Benchmark::Tpcds, table, scale_factor, Some(25_000));
+    let slices = plan(Benchmark::Tpcds, table, scale_factor, Some(25_000), 0);
     let mut total = 0;
     pipeline::ordered(
         slices.len(),
@@ -231,6 +301,7 @@ pub(crate) fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Vec<KeyRang
     match benchmark {
         Benchmark::Tpch => tpch_key_ranges(scale_factor),
         Benchmark::Tpcds => tpcds_key_ranges(scale_factor),
+        Benchmark::Ssb => ssb_key_ranges(scale_factor),
     }
 }
 
@@ -258,6 +329,22 @@ fn tpch_key_ranges(scale_factor: f64) -> Vec<KeyRange> {
         key("lineitem", "l_orderkey", 1, last_order),
         key("lineitem", "l_partkey", 1, parts),
         key("lineitem", "l_suppkey", 1, suppliers),
+    ]
+}
+
+fn ssb_key_ranges(scale_factor: f64) -> Vec<KeyRange> {
+    let rows = |table| synthetic::row_count(Benchmark::Ssb, table, scale_factor) as i64;
+    let (customers, suppliers, parts) = (rows("customer"), rows("supplier"), rows("part"));
+    let (first_date, last_date) = synthetic::ssb_date_key_bounds();
+    vec![
+        key("customer", "c_custkey", 1, customers),
+        key("date", "d_datekey", first_date, last_date),
+        key("lineorder", "lo_custkey", 1, customers),
+        key("lineorder", "lo_orderdate", first_date, last_date),
+        key("lineorder", "lo_partkey", 1, parts),
+        key("lineorder", "lo_suppkey", 1, suppliers),
+        key("part", "p_partkey", 1, parts),
+        key("supplier", "s_suppkey", 1, suppliers),
     ]
 }
 

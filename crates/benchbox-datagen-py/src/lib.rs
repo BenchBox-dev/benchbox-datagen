@@ -10,7 +10,7 @@ use benchbox_datagen_core::{
     generate_query as core_generate_query, key_ranges, record_batches, row_counts_cancellable,
     table_scales, write_benchmark_cancellable, write_refresh_sets,
 };
-use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_arrow::PyRecordBatchReader;
@@ -19,6 +19,19 @@ const SIGNAL_POLL: Duration = Duration::from_millis(20);
 
 fn value_error(error: Error) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+fn seed_value(seed: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u64>> {
+    seed.map(|seed| {
+        seed.extract::<u64>().map_err(|error| {
+            if error.is_instance_of::<PyOverflowError>(seed.py()) {
+                PyValueError::new_err("seed must be between 0 and 2**64 - 1")
+            } else {
+                error
+            }
+        })
+    })
+    .transpose()
 }
 
 #[pyclass(frozen, module = "benchbox_datagen._native")]
@@ -41,7 +54,7 @@ impl TableStream {
 }
 
 #[pyfunction]
-#[pyo3(signature = (benchmark, table, scale_factor, part = 1, parts = 1))]
+#[pyo3(signature = (benchmark, table, scale_factor, part = 1, parts = 1, seed = None))]
 fn generate_table(
     py: Python<'_>,
     benchmark: &str,
@@ -49,13 +62,16 @@ fn generate_table(
     scale_factor: f64,
     part: i32,
     parts: i32,
+    seed: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<TableStream> {
+    let seed = seed_value(seed)?;
     let request = TableRequest {
         benchmark: benchmark.parse().map_err(value_error)?,
         table: table.to_owned(),
         scale_factor,
         part,
         parts,
+        seed,
     };
     let reader = PyRecordBatchReader::new(record_batches(&request).map_err(value_error)?);
     Ok(TableStream {
@@ -102,7 +118,7 @@ impl From<FileStats> for FileStat {
 }
 
 #[pyfunction]
-#[pyo3(signature = (benchmark, scale_factor, output_dir, format = "parquet", compression = None, threads = None, parts = 1))]
+#[pyo3(signature = (benchmark, scale_factor, output_dir, format = "parquet", compression = None, threads = None, parts = 1, seed = None))]
 #[allow(clippy::too_many_arguments)]
 fn write_tables(
     py: Python<'_>,
@@ -113,7 +129,9 @@ fn write_tables(
     compression: Option<&str>,
     threads: Option<usize>,
     parts: i32,
+    seed: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Vec<FileStat>> {
+    let seed = seed_value(seed)?;
     let threads = non_zero_threads(threads)?;
     let request = OutputRequest {
         benchmark: benchmark.parse().map_err(value_error)?,
@@ -129,6 +147,7 @@ fn write_tables(
             .transpose()?,
         threads,
         parts,
+        seed,
         output_dir,
     };
     let cancel = Arc::new(AtomicBool::new(false));

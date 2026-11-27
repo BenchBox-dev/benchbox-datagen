@@ -4,6 +4,7 @@ mod pipeline;
 mod qgen;
 mod refresh;
 mod schema;
+mod synthetic;
 mod tpcds;
 mod tpch;
 
@@ -51,6 +52,8 @@ pub enum Error {
     Write(String),
     #[error("{0}")]
     Encode(String),
+    #[error("{0} output is not seeded; omit the seed argument")]
+    SeedNotSupported(Benchmark),
     #[error("{0}")]
     RefreshUnsupported(String),
     #[error("generation was cancelled")]
@@ -62,15 +65,29 @@ pub enum Error {
 pub enum Benchmark {
     Tpch,
     Tpcds,
+    Ssb,
 }
 
 impl Benchmark {
-    pub const ALL: [Benchmark; 2] = [Benchmark::Tpch, Benchmark::Tpcds];
+    pub const ALL: [Benchmark; 3] = [Benchmark::Tpch, Benchmark::Tpcds, Benchmark::Ssb];
 
     pub fn name(self) -> &'static str {
         match self {
             Benchmark::Tpch => "tpch",
             Benchmark::Tpcds => "tpcds",
+            Benchmark::Ssb => "ssb",
+        }
+    }
+
+    pub fn is_seeded(self) -> bool {
+        matches!(self, Benchmark::Ssb)
+    }
+
+    pub(crate) fn resolve_seed(self, seed: Option<u64>) -> Result<u64, Error> {
+        match (self.is_seeded(), seed) {
+            (true, seed) => Ok(seed.unwrap_or(synthetic::DEFAULT_SEED)),
+            (false, None) => Ok(0),
+            (false, Some(_)) => Err(Error::SeedNotSupported(self)),
         }
     }
 
@@ -92,6 +109,7 @@ impl Benchmark {
                 "lineitem",
             ],
             Benchmark::Tpcds => &tpcds::TABLES,
+            Benchmark::Ssb => &["date", "customer", "supplier", "part", "lineorder"],
         }
     }
 }
@@ -120,6 +138,7 @@ pub struct TableRequest {
     pub scale_factor: f64,
     pub part: i32,
     pub parts: i32,
+    pub seed: Option<u64>,
 }
 
 pub fn table_schema(benchmark: Benchmark, table: &str) -> Result<SchemaRef, Error> {
@@ -172,6 +191,7 @@ pub fn write_refresh_sets(
         Benchmark::Tpcds => Err(Error::RefreshUnsupported(
             "tpcds refresh sets are not available in this build".into(),
         )),
+        Benchmark::Ssb => Err(Error::RefreshUnsupported("ssb has no refresh sets".into())),
     }
 }
 
@@ -255,6 +275,7 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         scale_factor,
         part,
         parts,
+        seed,
     } = request;
     validate_scale_factor(*benchmark, *scale_factor)?;
     if *parts < 1 || *part < 1 || part > parts {
@@ -264,7 +285,8 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         });
     }
     let table = benchmark.table(table)?;
-    let slice = generate::part_slice(*benchmark, table, *scale_factor, *part, *parts);
+    let seed = benchmark.resolve_seed(*seed)?;
+    let slice = generate::part_slice(*benchmark, table, *scale_factor, *part, *parts, seed);
     Ok(Box::new(conformed(
         *benchmark,
         table,
@@ -286,6 +308,7 @@ mod tests {
             scale_factor,
             part,
             parts,
+            seed: None,
         }
     }
 
@@ -439,6 +462,7 @@ mod tests {
                 scale_factor: 1.0,
                 part: 1,
                 parts: 1,
+                seed: None,
             })
             .unwrap();
             assert_eq!(batches.schema(), schema, "{table}");
@@ -516,6 +540,7 @@ mod tests {
                     scale_factor,
                     part: 1,
                     parts: 1,
+                    seed: None,
                 }),
                 Err(Error::NonIntegerScaleFactor(_))
             ));
@@ -536,6 +561,7 @@ mod tests {
                     scale_factor,
                     part: 1,
                     parts: 1,
+                    seed: None,
                 })
                 .unwrap();
                 assert!(reader.next().unwrap().unwrap().num_rows() > 0);
