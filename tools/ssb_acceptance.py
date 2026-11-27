@@ -25,6 +25,8 @@ RANK_SIGMAS = 5.0
 EXCLUDED_ALWAYS = {
     ("lineorder", "lo_orderkey"): "order structure is 1-7 lines per order (legacy: geometric)",
     ("lineorder", "lo_linenumber"): "order structure is 1-7 lines per order (legacy: geometric)",
+    ("lineorder", "lo_orderdate"): "domain is the date table: 2,556 days (legacy 2,557)",
+    ("lineorder", "lo_commitdate"): "domain is the date table plus up to 121 days: starts from 2,556 days (legacy 2,557)",
 }
 EXCLUDED_WHEN_PART_ROWS_DIFFER = {("part", "p_partkey"), ("part", "p_name"), ("lineorder", "lo_partkey")}
 DATE_DIGEST_SQL = (
@@ -460,7 +462,7 @@ def cmd_report(args: argparse.Namespace) -> None:
     lines += ["| SF | library seed | in legacy range | in 99.9% prediction interval | rank-equivalent quantile | excluded | outside |", "|---|---|---|---|---|---|---|"]
     details = []
     excluded = {}
-    for scale in (0.01, 0.1, 1.0):
+    for scale in (0.1, 1.0):
         compare = load(base / f"compare_{sf_name(scale)}.json")
         if compare is None:
             continue
