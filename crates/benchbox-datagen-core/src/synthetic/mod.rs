@@ -1,4 +1,5 @@
 pub(crate) mod calendar;
+mod clickbench;
 pub(crate) mod delimited;
 pub(crate) mod rng;
 mod ssb;
@@ -65,6 +66,7 @@ pub(crate) trait Generator: Sync {
 
 #[rustfmt::skip]
 const REGISTRY: &[&dyn Generator] = &[
+    &clickbench::Clickbench,
     &ssb::Ssb,
 ];
 

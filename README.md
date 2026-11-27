@@ -24,7 +24,7 @@ pinned by exact version. This project does not fork them: fixes go upstream, and
 patch carried until upstream releases it is listed under
 [Carried upstream patches](#carried-upstream-patches).
 
-Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) and SSB (all five tables, any scale factor) as
+Today the library generates TPC-H (all eight tables, any scale factor), TPC-DS (the 24 benchmark tables at scale factors below 1 and at integer scale factors of 1 or more, in `CompatMode::C`, byte-identical to the bundled patched `dsdgen`) SSB (all five tables, any scale factor) and ClickBench (the `hits` table, any scale factor) as
 Arrow record batches or as files, and reports exact per-table row counts. Output
 carries BenchBox's Arrow types (`int64`, `decimal128(15, 2)`, `date32`, `utf8`,
 `NOT NULL` columns non-nullable). Delimited output is byte-identical to the
@@ -93,7 +93,7 @@ table (`format` is `"parquet"` or `"tbl"`; Parquet compression is `"none"`,
 `"snappy"` (default), `"gzip"` or `"zstd"`; `.tbl` is uncompressed). With
 `parts > 1` each table except `nation` and `region` is split into
 `<table>.<format>.<part>` files (for example `lineitem.tbl.3`, the same shard naming BenchBox uses). `threads=None` uses every available CPU.
-`generate_table` takes the same `seed`. Seeded benchmarks (`ssb`) default to 42;
+`generate_table` takes the same `seed`. Seeded benchmarks (`ssb`, `clickbench`) default to 42;
 passing a seed to an unseeded benchmark (`tpch`) raises `ValueError`.
 
 ## Deterministic synthetic generators
@@ -239,6 +239,35 @@ apply `rowcount("active_x", "store")`, which is the smaller of the value and the
 are a data-dependent subset of the matching sales range, so no exact bounds exist
 without generating the returns rows; the bounds of the sales range would be only a
 superset, and are left out so that every reported range is exact.
+
+### ClickBench
+
+The synthetic `hits` table follows BenchBox's legacy `ClickBenchDataGenerator`
+(`benchbox/core/clickbench`): the same 105 columns in the same order, the same
+value domains and the same per-column distributions (uniform integers over the
+legacy ranges, uniform picks from the legacy value lists with the legacy empty-string
+padding, `EventTime`, `ClientEventTime` and `LocalEventTime` equal and
+uniform over 2013-07-01 00:00:00 to 2013-07-31 23:59:59, `EventDate` their date,
+`RegionID` repeated as `RefererRegionID` and `URLRegionID`, `URL` repeated as
+`OriginalURL`, the resolution pair repeated as the window size, `MobilePhone`
+equal to `IsMobile` and a phone model only on mobile rows); only the random stream
+changed. The BenchBox Arrow schema has `int64` for every `BIGINT`, `INTEGER` and
+`SMALLINT` column, `utf8` for `TEXT` and `VARCHAR`, `timestamp[us]` and `date32`,
+all non-nullable.
+
+| Table | Rows at scale factor `SF` | Source |
+| :--- | :--- | :--- |
+| `hits` | `max(1, floor(1,000,000 * SF))` | legacy `int(1_000_000 * scale_factor)` |
+
+Delimited output is `hits.csv`: `|`-separated, no header, an empty string written as
+`""` (legacy `quote_clickbench_field`), timestamps as `YYYY-MM-DD HH:MM:SS`, dates
+as `YYYY-MM-DD`. The legacy writer ends lines with CRLF; the shared synthetic text
+writer ends them with LF. `hits` has no foreign keys, so `key_ranges` is empty.
+Its legacy primary key `(CounterID, EventDate, UserID, EventTime, WatchID)` is
+unique with overwhelming probability rather than by construction, as in legacy.
+The ClickBench queries are in `tools/synthetic_configs/clickbench.py` with every
+column name double-quoted, because DataFusion lowercases unquoted identifiers
+and the Parquet columns are mixed case.
 
 ## Adding a synthetic generator
 
