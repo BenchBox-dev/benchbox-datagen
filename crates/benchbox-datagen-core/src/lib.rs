@@ -24,6 +24,7 @@ pub use benchbox_datagen_writers::Compression;
 pub use generate::{KeyRange, TableScale};
 pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
 pub use qgen::{GeneratedQuery, QgenError, QueryRequest, generate_query};
+pub use synthetic::SyntheticId;
 pub use tpcds::ActiveLocations;
 
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
@@ -31,7 +32,7 @@ pub type BatchReader = Box<dyn RecordBatchReader + Send>;
 #[derive(Debug, thiserror::Error, PartialEq)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("unknown benchmark {0:?}; supported: {supported}", supported = Benchmark::ALL.map(|b| b.name()).join(", "))]
+    #[error("unknown benchmark {0:?}; supported: {supported}", supported = Benchmark::all().map(|b| b.name()).collect::<Vec<_>>().join(", "))]
     UnknownBenchmark(String),
     #[error("unknown {benchmark} table {table:?}; tables: {tables}", tables = benchmark.tables().join(", "))]
     UnknownTable { benchmark: Benchmark, table: String },
@@ -69,22 +70,26 @@ pub enum Error {
 pub enum Benchmark {
     Tpch,
     Tpcds,
-    Ssb,
+    Synthetic(SyntheticId),
 }
 
 impl Benchmark {
-    pub const ALL: [Benchmark; 3] = [Benchmark::Tpch, Benchmark::Tpcds, Benchmark::Ssb];
+    pub fn all() -> impl Iterator<Item = Benchmark> {
+        [Benchmark::Tpch, Benchmark::Tpcds]
+            .into_iter()
+            .chain(SyntheticId::all().map(Benchmark::Synthetic))
+    }
 
     pub fn name(self) -> &'static str {
         match self {
             Benchmark::Tpch => "tpch",
             Benchmark::Tpcds => "tpcds",
-            Benchmark::Ssb => "ssb",
+            Benchmark::Synthetic(id) => id.generator().name(),
         }
     }
 
     pub fn is_seeded(self) -> bool {
-        matches!(self, Benchmark::Ssb)
+        matches!(self, Benchmark::Synthetic(_))
     }
 
     pub(crate) fn resolve_seed(self, seed: Option<u64>) -> Result<u64, Error> {
@@ -113,7 +118,7 @@ impl Benchmark {
                 "lineitem",
             ],
             Benchmark::Tpcds => &tpcds::TABLES,
-            Benchmark::Ssb => &["date", "customer", "supplier", "part", "lineorder"],
+            Benchmark::Synthetic(id) => id.generator().tables(),
         }
     }
 }
@@ -128,8 +133,7 @@ impl FromStr for Benchmark {
     type Err = Error;
 
     fn from_str(name: &str) -> Result<Self, Error> {
-        Benchmark::ALL
-            .into_iter()
+        Benchmark::all()
             .find(|benchmark| benchmark.name().eq_ignore_ascii_case(name))
             .ok_or_else(|| Error::UnknownBenchmark(name.to_owned()))
     }
@@ -202,7 +206,10 @@ pub fn write_refresh_sets(
                 cancel,
             )
         }
-        Benchmark::Ssb => Err(Error::RefreshUnsupported("ssb has no refresh sets".into())),
+        Benchmark::Synthetic(id) => Err(Error::RefreshUnsupported(format!(
+            "{} has no refresh sets",
+            id.generator().name()
+        ))),
     }
 }
 
@@ -215,7 +222,7 @@ pub fn active_locations(benchmark: Benchmark, scale_factor: f64) -> Result<Activ
     validate_scale_factor(benchmark, scale_factor)?;
     match benchmark {
         Benchmark::Tpcds => Ok(tpcds::active_locations(scale_factor)),
-        Benchmark::Tpch | Benchmark::Ssb => Err(Error::NoActiveLocations(benchmark)),
+        Benchmark::Tpch | Benchmark::Synthetic(_) => Err(Error::NoActiveLocations(benchmark)),
     }
 }
 

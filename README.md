@@ -130,10 +130,32 @@ the output and is a generator version bump that refreezes the golden hashes.
   ranges (blocks are sliced at the range edges), so concatenating the part
   files reproduces the single file byte for byte. Small dimension tables
   (`ssb.date`) are never split.
-- **Text output.** `.tbl` is `|`-separated with a `\n` line end, no trailing
-  delimiter, nulls empty and dates as `YYYY-MM-DD`. Parquet carries the same
-  Arrow types as the BenchBox schema dump (`tests/data/<benchmark>_arrow_schemas.json`,
-  refreshed with `tools/dump_benchbox_schemas.py <benchmark>`).
+- **Text output.** One text form per Arrow type, shared by every synthetic
+  generator (the SSB bytes are unchanged). Lines end in `\n`; a null is an empty
+  field. A table declares its delimited-text properties once (`Generator::text_format`):
+  the delimiter (default `|`), a header row (default none) and the file
+  extension (default `tbl`; the CSV preset is `csv`, with RFC 4180 quoting of
+  fields that contain the delimiter, a quote or a newline, and `""` for an empty
+  string so it differs from a null). A header is written on part 1 only (also for a table with no rows), so
+  concatenating the parts still reproduces the single file. Nothing else is
+  per-generator code.
+
+  | Arrow type | Text | Legacy evidence |
+  | :--- | :--- | :--- |
+  | `int32`, `int64` | plain decimal | all eight generators |
+  | `date32` | `YYYY-MM-DD` | `strftime("%Y-%m-%d")`, `date.isoformat()` in `amplab`, `clickbench`, `coffeeshop`, `tpch_skew` |
+  | `timestamp[us]` | `YYYY-MM-DD HH:MM:SS`, plus `.ffffff` only when the microseconds are not zero (Python `str(datetime)`) | `strftime("%Y-%m-%d %H:%M:%S")` in `h2odb`, `tsbs_devops`, `clickbench` |
+  | `float`, `double` | shortest round-trip digits in Python `repr` layout (`0.1`, `1.0`, `1e-05`, `1e+16`, `nan`, `inf`) | `h2odb` and `amplab` write Python floats through `csv`/`str` |
+  | fixed-scale `double` (`Kind::Fixed(n)`; the scale travels as the field metadata `benchbox.fixed_scale`, so a table cannot forget it) | `n` decimals (`1.50`), ties to even (`0.125` is `0.12`) | `tsbs_devops` metrics and `coffeeshop` prices use `f"{x:.2f}"` |
+  | `decimal128(p, s)` | exactly `s` decimals, `-0.05`, no exponent | TPC-H style `dbgen` decimals; `h2odb`, `coffeeshop`, `amplab` declare `DECIMAL` columns |
+  | `bool` | `true` / `false` | no legacy generator among the eight writes one; the form every target engine accepts |
+  | `fixed_size_list<float>[n]` | `[v1,v2,...]`, each element `%.6g` | `vector_search._array_to_csv` (`f"{v:.6g}"` joined by `,`) |
+  | `utf8` | raw bytes | all |
+
+  Any other Arrow type (unsigned or 8/16-bit integers, other timestamp units or
+  time zones, negative decimal scales, lists of other types) is reported as an
+  error before the first byte is written. Parquet needs no text form and
+  carries every type natively; it is round-trip tested for all of them.
 - **Seeds.** A `u64` (`0` to `2**64 - 1`; Python raises `ValueError` outside that range), default 42. Row counts never depend on the seed.
 
 ### SSB
@@ -169,7 +191,8 @@ key `((n >> 3) << 5) + (n & 7)`, the reference `mk_sparse` mapping for the paper
 byte-identical to legacy `date.tbl` for its 2,556 rows, apart from line endings
 (the legacy writer emits CRLF) and the legacy 2,557th row.
 
-`tools/ssb_acceptance.py` produces the legacy-versus-library comparison,
+`tools/synthetic_acceptance.py ssb ...` (config in `tools/synthetic_configs/ssb.py`)
+produces the legacy-versus-library comparison,
 foreign-key and uniqueness checks and the 13-query DuckDB/DataFusion agreement
 that gate the frozen goldens in `crates/benchbox-datagen-core/tests/ssb.rs`.
 
@@ -186,6 +209,23 @@ on 30 seeds per side (42-71) at that scale: the library fails only if its
 empty-seed count is higher than legacy's with one-sided Fisher exact p < 0.001
 (5 against 5 seeds cannot reach that p-value).
 
+The seeds are fixed in `tools/synthetic_configs/base.py` (`SEEDS` = 42-46 and
+`EXTENDED_SEEDS` = 42-71, the 99.9% interval constant is the Student t value for
+those 4 degrees of freedom); a config cannot change them.
+
+Every Arrow kind has a statistic. Each column is reduced to one number per row,
+then summarised by null rate, distinct ratio, mean and the 1/25/50/75/99%
+quantiles: strings by their length; integers, floats, decimals as the value;
+booleans as 0/1; dates and timestamps as microseconds since the epoch
+(`epoch_us`); vectors (`fixed_size_list<float>[n]`) as the population standard
+deviation of their components, which pins the dimension and normalisation
+without being sensitive to the sign pattern. Arrow type names are normalised
+(`date32[day]` is `date32`) and an unmapped type raises `ValueError` rather than
+being skipped. Legacy files are read by the config's `legacy_suffix` (default
+`tbl`), `legacy_delimiter` (default `|`) and `legacy_header` (default false);
+`tests/test_synthetic_acceptance_types.py` runs the whole statistic and compare
+path on a CSV/Parquet fixture that has every kind.
+
 `table_scales(benchmark, scale_factor)` reports each table's `id_count` and `source_rows`.
 `active_locations("tpcds", scale_factor)` returns the dsqgen `rowcount()` inputs
 `active_cities`, `active_counties` and `active_states` (TPC-DS only; TPC-H and SSB raise
@@ -199,6 +239,65 @@ apply `rowcount("active_x", "store")`, which is the smaller of the value and the
 are a data-dependent subset of the matching sales range, so no exact bounds exist
 without generating the returns rows; the bounds of the sales range would be only a
 superset, and are left out so that every reported range is exact.
+
+## Adding a synthetic generator
+
+A synthetic generator is one Rust module plus one registry entry (one line),
+one Python config file and one schema file; nothing else is edited.
+
+1. **Module.** Add `crates/benchbox-datagen-core/src/synthetic/<name>.rs` with a
+   unit struct that implements `synthetic::Generator`: `name`, `tables`,
+   `schema` (build it with `schema::build` from a column list kept in the
+   module), `row_count`, `open` (returns a `Table` whose `block(index)` is a
+   pure function of the block index and the seed), `key_ranges`, and, only when
+   the defaults are wrong, `splittable` (default: every table splits) and
+   `table_scales` (default: `id_count == source_rows == row_count`). Refresh
+   sets are unsupported for every synthetic benchmark. Column types come from
+   `schema::Kind` (`Int`, `Int32`, `Decimal`, `Decimal128`, `Float32`,
+   `Float64`, `Fixed`, `Bool`, `Timestamp`, `Date`, `Text`, `Vector`); a table whose
+   legacy files are not `|`-separated `.tbl` overrides `text_format` (see Text
+   output above).
+
+   **Row counts and key ranges are closed-form functions of the scale
+   factor, not of the seed**: `row_count`, `key_ranges` and `table_scales` take
+   no seed, and a part is a row range of a fixed-size table. A table whose
+   child count varies per parent (SSB's 1-7 `lineorder` lines per order,
+   coffeeshop's `order_lines`) follows SSB: the table has a fixed row count
+   (the legacy mean times the scale), the cursor that assigns rows to parents
+   is seeded, and the order-structure columns are listed in the config's
+   `exclusions` with a reason because legacy and library differ there by
+   construction.
+2. **Registry.** In `synthetic/mod.rs` add `mod <name>;` and append
+   `&<name>::<Struct>` to `REGISTRY`. The registry is one entry per line, so
+   parallel additions merge mechanically (the `mod` lines and the entries are the
+   only shared lines, and a conflict there is resolved by keeping both); Python
+   names, `table_names`, `row_counts`, `table_scales`, `key_ranges`, the seed
+   default, `write_tables` and `generate_table` all follow from it.
+3. **Schema file.** Add `tests/data/<name>_arrow_schemas.json`, produced with
+   `tools/dump_benchbox_schemas.py <name>` from the BenchBox schema, and a
+   Rust test with frozen SHA-256 goldens for `tbl` and `parquet` at the gate
+   scales (see `crates/benchbox-datagen-core/tests/ssb.rs`).
+4. **Config.** Add `tools/synthetic_configs/<name>.py` that defines `CONFIG =
+   SyntheticConfig(...)`: tables, primary and foreign keys, `expected_rows`,
+   the queries (a JSON `{id: sql}` file path or a callable), the legacy
+   generator, `benchbox_schema` (for the schema dump tool), the budgets used by
+   `tools/bench_budgets.py`, and the exclusions. Config files are discovered by
+   file name, so no list needs editing. Every exclusion (column, whole table or
+   data-dependent) needs a written reason; a blank reason raises.
+5. **Evidence.** Run, for each scale in the config, `tools/synthetic_acceptance.py
+   <name> legacy`, `library` (the same seeds), `compare` (add `*_queries`
+   files for seeds 47-71 when legacy leaves a query empty) and `verify`, then
+   `report`, and put the report in the PR. Required results, unchanged from
+   SSB: every metric inside the legacy min-max or the 99.9% prediction
+   interval of 5 legacy seeds (boundary quantiles of low-cardinality columns
+   may pass by rank); queries never empty in legacy never empty in the
+   library, otherwise 30 seeds per side with one-sided Fisher p >= 0.001; no
+   orphan or duplicate keys; every query returns the same rows in DuckDB and
+   DataFusion; wall-time and peak-RSS budgets met. Also run
+   `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
+   `pytest tests` and `python3 tools/third_party_licenses.py --check`.
+6. **Docs.** Add a section for the benchmark to this README next to SSB
+   (tables, row-count rules, sources) and add it to the list at the top.
 
 ## Layout
 

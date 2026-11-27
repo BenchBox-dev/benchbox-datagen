@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use arrow::array::{ArrayRef, Int64Array, StringBuilder};
 use arrow::datatypes::SchemaRef;
@@ -10,7 +11,9 @@ use super::calendar::{
     civil_from_days, date_key, days_from_civil, days_in_month, iso_week, weekday_from_monday,
 };
 use super::rng::{Draw, Stream};
-use super::{BLOCK_ROWS, Table, block_len, ssb_schema};
+use super::{BLOCK_ROWS, Generator, Table, block_len};
+use crate::generate::{KeyRange, key};
+use crate::schema::{self, Column, Int, Text};
 
 const BENCHMARK: &str = "ssb";
 const CUSTOMERS_PER_SCALE: u64 = 30_000;
@@ -102,11 +105,151 @@ const DAYS: [&str; 7] = [
     "Sunday",
 ];
 
+const COLUMNS: [(&str, &[Column]); 5] = [
+    (
+        "date",
+        &[
+            ("d_datekey", Int, true),
+            ("d_date", Text, true),
+            ("d_dayofweek", Text, true),
+            ("d_month", Text, true),
+            ("d_year", Int, true),
+            ("d_yearmonthnum", Int, true),
+            ("d_yearmonth", Text, true),
+            ("d_daynuminweek", Int, true),
+            ("d_daynuminmonth", Int, true),
+            ("d_daynuminyear", Int, true),
+            ("d_monthnuminyear", Int, true),
+            ("d_weeknuminyear", Int, true),
+            ("d_sellingseason", Text, true),
+            ("d_lastdayinweekfl", Int, true),
+            ("d_lastdayinmonthfl", Int, true),
+            ("d_holidayfl", Int, true),
+            ("d_weekdayfl", Int, true),
+        ],
+    ),
+    (
+        "customer",
+        &[
+            ("c_custkey", Int, true),
+            ("c_name", Text, true),
+            ("c_address", Text, true),
+            ("c_city", Text, true),
+            ("c_nation", Text, true),
+            ("c_region", Text, true),
+            ("c_phone", Text, true),
+            ("c_mktsegment", Text, true),
+        ],
+    ),
+    (
+        "supplier",
+        &[
+            ("s_suppkey", Int, true),
+            ("s_name", Text, true),
+            ("s_address", Text, true),
+            ("s_city", Text, true),
+            ("s_nation", Text, true),
+            ("s_region", Text, true),
+            ("s_phone", Text, true),
+        ],
+    ),
+    (
+        "part",
+        &[
+            ("p_partkey", Int, true),
+            ("p_name", Text, true),
+            ("p_mfgr", Text, true),
+            ("p_category", Text, true),
+            ("p_brand1", Text, true),
+            ("p_color", Text, true),
+            ("p_type", Text, true),
+            ("p_size", Int, true),
+            ("p_container", Text, true),
+        ],
+    ),
+    (
+        "lineorder",
+        &[
+            ("lo_orderkey", Int, true),
+            ("lo_linenumber", Int, true),
+            ("lo_custkey", Int, true),
+            ("lo_partkey", Int, true),
+            ("lo_suppkey", Int, true),
+            ("lo_orderdate", Int, false),
+            ("lo_orderpriority", Text, true),
+            ("lo_shippriority", Int, true),
+            ("lo_quantity", Int, true),
+            ("lo_extendedprice", Int, true),
+            ("lo_ordtotalprice", Int, true),
+            ("lo_discount", Int, true),
+            ("lo_revenue", Int, true),
+            ("lo_supplycost", Int, true),
+            ("lo_tax", Int, true),
+            ("lo_commitdate", Int, true),
+            ("lo_shipmode", Text, true),
+        ],
+    ),
+];
+
+static SCHEMAS: LazyLock<HashMap<&'static str, SchemaRef>> =
+    LazyLock::new(|| schema::build(&COLUMNS));
+
+fn ssb_schema(table: &str) -> SchemaRef {
+    SCHEMAS
+        .get(table)
+        .cloned()
+        .expect("every SSB table has a schema")
+}
+
+pub(super) struct Ssb;
+
+impl Generator for Ssb {
+    fn name(&self) -> &'static str {
+        "ssb"
+    }
+
+    fn tables(&self) -> &'static [&'static str] {
+        &["date", "customer", "supplier", "part", "lineorder"]
+    }
+
+    fn schema(&self, table: &str) -> Option<SchemaRef> {
+        SCHEMAS.get(table).cloned()
+    }
+
+    fn row_count(&self, table: &str, scale_factor: f64) -> u64 {
+        row_count(table, scale_factor)
+    }
+
+    fn open(&self, table: &str, scale_factor: f64, seed: u64) -> Arc<dyn Table> {
+        open(table, scale_factor, seed)
+    }
+
+    fn splittable(&self, table: &str) -> bool {
+        table != "date"
+    }
+
+    fn key_ranges(&self, scale_factor: f64) -> Vec<KeyRange> {
+        let rows = |table| row_count(table, scale_factor) as i64;
+        let (customers, suppliers, parts) = (rows("customer"), rows("supplier"), rows("part"));
+        let (first_date, last_date) = date_key_bounds();
+        vec![
+            key("customer", "c_custkey", 1, customers),
+            key("date", "d_datekey", first_date, last_date),
+            key("lineorder", "lo_custkey", 1, customers),
+            key("lineorder", "lo_orderdate", first_date, last_date),
+            key("lineorder", "lo_partkey", 1, parts),
+            key("lineorder", "lo_suppkey", 1, suppliers),
+            key("part", "p_partkey", 1, parts),
+            key("supplier", "s_suppkey", 1, suppliers),
+        ]
+    }
+}
+
 fn scaled(base: u64, scale_factor: f64) -> u64 {
     ((base as f64 * scale_factor) as u64).max(1)
 }
 
-pub(super) fn row_count(table: &str, scale_factor: f64) -> u64 {
+fn row_count(table: &str, scale_factor: f64) -> u64 {
     match table {
         "date" => DATE_ROWS,
         "customer" => scaled(CUSTOMERS_PER_SCALE, scale_factor),
@@ -125,7 +268,7 @@ fn part_rows(scale_factor: f64) -> u64 {
     PARTS_PER_SCALE * (1 + floor_log2)
 }
 
-pub(super) fn open(table: &str, scale_factor: f64, seed: u64) -> Arc<dyn Table> {
+fn open(table: &str, scale_factor: f64, seed: u64) -> Arc<dyn Table> {
     let rows = row_count(table, scale_factor);
     match table {
         "date" => Arc::new(DateTable),
@@ -137,7 +280,7 @@ pub(super) fn open(table: &str, scale_factor: f64, seed: u64) -> Arc<dyn Table> 
     }
 }
 
-pub(crate) fn date_key_bounds() -> (i64, i64) {
+fn date_key_bounds() -> (i64, i64) {
     let first = first_day();
     (date_key(first), date_key(first + DATE_ROWS as i64 - 1))
 }

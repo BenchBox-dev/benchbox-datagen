@@ -10,6 +10,10 @@ use benchbox_datagen_core::{
 };
 use sha2::{Digest, Sha256};
 
+fn ssb() -> Benchmark {
+    "ssb".parse().unwrap()
+}
+
 const TABLES: [&str; 5] = ["date", "customer", "supplier", "part", "lineorder"];
 
 const GOLDENS: &[(&str, &str, &str, &str)] = &[
@@ -144,7 +148,7 @@ fn request(
     seed: Option<u64>,
 ) -> OutputRequest {
     OutputRequest {
-        benchmark: Benchmark::Ssb,
+        benchmark: ssb(),
         scale_factor,
         format,
         compression: None,
@@ -180,7 +184,7 @@ fn digests(request: &OutputRequest) -> Vec<(String, String)> {
 
 fn table_request(table: &str, scale_factor: f64, seed: Option<u64>) -> TableRequest {
     TableRequest {
-        benchmark: Benchmark::Ssb,
+        benchmark: ssb(),
         table: table.to_owned(),
         scale_factor,
         part: 1,
@@ -220,7 +224,7 @@ fn row_counts_follow_the_ssb_scale_rules_at_every_gate_scale() {
         (100.0, [2_556, 3_000_000, 200_000, 1_400_000, 600_000_000]),
     ];
     for (scale_factor, rows) in expected {
-        let counts = row_counts(Benchmark::Ssb, scale_factor).unwrap();
+        let counts = row_counts(ssb(), scale_factor).unwrap();
         assert_eq!(
             counts.iter().map(|(table, _)| *table).collect::<Vec<_>>(),
             TABLES
@@ -234,9 +238,9 @@ fn row_counts_follow_the_ssb_scale_rules_at_every_gate_scale() {
 
 #[test]
 fn generated_rows_equal_the_reported_counts_and_schemas() {
-    for (table, rows) in row_counts(Benchmark::Ssb, 0.01).unwrap() {
+    for (table, rows) in row_counts(ssb(), 0.01).unwrap() {
         let reader = record_batches(&table_request(table, 0.01, None)).unwrap();
-        let schema = table_schema(Benchmark::Ssb, table).unwrap();
+        let schema = table_schema(ssb(), table).unwrap();
         assert_eq!(
             arrow::record_batch::RecordBatchReader::schema(&reader),
             schema
@@ -250,7 +254,7 @@ fn generated_rows_equal_the_reported_counts_and_schemas() {
 fn foreign_keys_resolve_and_orders_are_well_formed() {
     let dates: HashSet<i64> = int_column("date", 0.1, "d_datekey").into_iter().collect();
     assert_eq!(dates.len(), 2_556);
-    let ranges = key_ranges(Benchmark::Ssb, 0.1).unwrap();
+    let ranges = key_ranges(ssb(), 0.1).unwrap();
     let range = |column: &str| ranges.iter().find(|r| r.column == column).unwrap();
     for (column, parent) in [
         ("lo_custkey", "c_custkey"),
