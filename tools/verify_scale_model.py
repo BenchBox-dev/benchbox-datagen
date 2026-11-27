@@ -43,16 +43,16 @@ def main() -> int:
     args = parser.parse_args()
     oracle = Path(args.oracle_dir)
     names = columns()
-    scales = benchbox_datagen.table_scales("tpcds", args.scale)
+    rows = benchbox_datagen.row_counts("tpcds", args.scale)
     ranges = benchbox_datagen.key_ranges("tpcds", args.scale)
     report: dict[str, object] = {"scale": args.scale, "rows": {}, "key_ranges": {}}
     ok = True
-    for table, scale in scales.items():
+    for table, library_rows in rows.items():
         wanted = list(ranges.get(table, {}))
         seen = observed(oracle / f"{table}.dat", names[table], wanted)
-        rows_match = seen["__rows__"][0] == scale["rows"]
+        rows_match = seen["__rows__"][0] == library_rows
         ok &= rows_match
-        report["rows"][table] = {"library": scale["rows"], "dsdgen": seen["__rows__"][0], "match": rows_match}
+        report["rows"][table] = {"library": library_rows, "dsdgen": seen["__rows__"][0], "match": rows_match}
         for column in wanted:
             match = tuple(seen[column]) == tuple(ranges[table][column])
             ok &= match

@@ -104,6 +104,12 @@ def test_row_counts_equal_the_published_scale_factor_one_cardinalities():
     assert counts == SF1_ROWS
 
 
+def test_row_counts_honour_threads():
+    assert benchbox_datagen.row_counts("tpcds", 1.0, threads=1) == SF1_ROWS
+    with pytest.raises(ValueError, match="threads must be at least 1"):
+        benchbox_datagen.row_counts("tpcds", 1.0, threads=0)
+
+
 def test_row_counts_scale_with_the_scale_factor():
     counts = benchbox_datagen.row_counts("tpcds", 10.0)
     assert counts["store_sales"] == 28_800_991
@@ -191,6 +197,19 @@ def test_dsqgen_rowcount_inputs_equal_the_patched_dsdgen_values(scale):
     assert scales["customer"]["source_rows"] == expected["customer"]
     for table in ("store_sales", "web_sales", "catalog_sales"):
         assert scales[table]["source_rows"] == expected[table], table
+
+
+@pytest.mark.parametrize("scale", [1.5, 2.5])
+def test_non_integer_scale_factors_of_one_or_more_are_rejected(scale):
+    with pytest.raises(ValueError, match="whole numbers"):
+        benchbox_datagen.row_counts("tpcds", scale)
+    with pytest.raises(ValueError, match="whole numbers"):
+        benchbox_datagen.generate_table("tpcds", "item", scale)
+
+
+@pytest.mark.parametrize("scale", [0.29, 2.0])
+def test_fractional_and_integer_scale_factors_are_accepted(scale):
+    assert benchbox_datagen.row_counts("tpcds", scale)["item"] > 0
 
 
 def test_subscale_row_counts_use_the_proportional_model_with_a_one_row_floor():

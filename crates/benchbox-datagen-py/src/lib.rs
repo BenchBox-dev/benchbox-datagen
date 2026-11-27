@@ -6,8 +6,9 @@ use std::thread;
 use std::time::Duration;
 
 use benchbox_datagen_core::{
-    Benchmark, Error, FileStats, OutputRequest, TableRequest, key_ranges, record_batches,
-    row_counts, table_scales, write_benchmark_cancellable, write_refresh_sets,
+    Benchmark, Error, FileStats, OutputRequest, QueryRequest, TableRequest,
+    generate_query as core_generate_query, key_ranges, record_batches, row_counts_cancellable,
+    table_scales, write_benchmark_cancellable, write_refresh_sets,
 };
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -113,13 +114,7 @@ fn write_tables(
     threads: Option<usize>,
     parts: i32,
 ) -> PyResult<Vec<FileStat>> {
-    let threads = match threads {
-        None => None,
-        Some(count) => Some(
-            NonZeroUsize::new(count)
-                .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))?,
-        ),
-    };
+    let threads = non_zero_threads(threads)?;
     let request = OutputRequest {
         benchmark: benchmark.parse().map_err(value_error)?,
         scale_factor,
@@ -161,16 +156,45 @@ fn write_tables(
     Ok(stats.into_iter().map(FileStat::from).collect())
 }
 
+fn non_zero_threads(threads: Option<usize>) -> PyResult<Option<NonZeroUsize>> {
+    threads
+        .map(|count| {
+            NonZeroUsize::new(count)
+                .ok_or_else(|| PyValueError::new_err("threads must be at least 1"))
+        })
+        .transpose()
+}
+
 #[pyfunction(name = "row_counts")]
+#[pyo3(signature = (benchmark, scale_factor, threads = None))]
 fn row_counts_py<'py>(
     py: Python<'py>,
     benchmark: &str,
     scale_factor: f64,
+    threads: Option<usize>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
-    let counts = py
-        .detach(|| row_counts(benchmark, scale_factor))
-        .map_err(value_error)?;
+    let threads = non_zero_threads(threads)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let cancel = Arc::clone(&cancel);
+        thread::spawn(move || row_counts_cancellable(benchmark, scale_factor, threads, &cancel))
+    };
+    while !worker.is_finished() {
+        py.detach(|| thread::sleep(SIGNAL_POLL));
+        if let Err(signal) = py.check_signals() {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = py.detach(|| worker.join());
+            return Err(signal);
+        }
+    }
+    let counts = worker
+        .join()
+        .map_err(|_| PyRuntimeError::new_err("the row counting thread panicked"))?
+        .map_err(|error| match error {
+            Error::Cancelled => PyRuntimeError::new_err(error.to_string()),
+            other => value_error(other),
+        })?;
     let result = PyDict::new(py);
     for (table, rows) in counts {
         result.set_item(table, rows)?;
@@ -189,10 +213,34 @@ fn write_refresh(
     rng_seed: Option<i32>,
 ) -> PyResult<Vec<FileStat>> {
     let benchmark = benchmark.parse::<Benchmark>().map_err(value_error)?;
-    let stats = py
-        .detach(|| write_refresh_sets(benchmark, scale_factor, sets, rng_seed, &output_dir))
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let cancel = Arc::clone(&cancel);
+        thread::spawn(move || {
+            write_refresh_sets(
+                benchmark,
+                scale_factor,
+                sets,
+                rng_seed,
+                &output_dir,
+                &cancel,
+            )
+        })
+    };
+    while !worker.is_finished() {
+        py.detach(|| thread::sleep(SIGNAL_POLL));
+        if let Err(signal) = py.check_signals() {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = py.detach(|| worker.join());
+            return Err(signal);
+        }
+    }
+    let stats = worker
+        .join()
+        .map_err(|_| PyRuntimeError::new_err("the refresh writer thread panicked"))?
         .map_err(|error| match error {
             Error::Write(message) => PyOSError::new_err(message),
+            Error::Cancelled => PyRuntimeError::new_err(error.to_string()),
             other => value_error(other),
         })?;
     Ok(stats.into_iter().map(FileStat::from).collect())
@@ -243,6 +291,37 @@ fn key_ranges_py<'py>(
     Ok(result)
 }
 
+#[pyfunction]
+#[pyo3(signature = (benchmark, query, template_text, distributions_text, scale_factor, seed = None, stream = None, default_params = false))]
+#[allow(clippy::too_many_arguments)]
+fn generate_query(
+    benchmark: &str,
+    query: &str,
+    template_text: &str,
+    distributions_text: &str,
+    scale_factor: f64,
+    seed: Option<i64>,
+    stream: Option<u32>,
+    default_params: bool,
+) -> PyResult<(String, Vec<String>)> {
+    if benchmark != "tpch" {
+        return Err(PyValueError::new_err(format!(
+            "query generation is not available for benchmark {benchmark:?}"
+        )));
+    }
+    let generated = core_generate_query(&QueryRequest {
+        query,
+        template: template_text,
+        distributions: distributions_text,
+        scale_factor,
+        seed,
+        stream,
+        default_params,
+    })
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((generated.text, generated.params))
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -255,5 +334,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(key_ranges_py, module)?)?;
     module.add_function(wrap_pyfunction!(table_scales_py, module)?)?;
     module.add_function(wrap_pyfunction!(write_refresh, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_query, module)?)?;
     Ok(())
 }

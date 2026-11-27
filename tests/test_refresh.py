@@ -99,3 +99,10 @@ def test_refresh_rejects_invalid_requests(tmp_path):
         benchbox_datagen.write_refresh("tpch", 0.01, tmp_path, sets=0)
     with pytest.raises(ValueError, match="scale factor"):
         benchbox_datagen.write_refresh("tpch", 0.0, tmp_path)
+
+
+def test_failed_refresh_leaves_no_partial_files(tmp_path):
+    (tmp_path / "lineitem.tbl.u2").mkdir()
+    with pytest.raises(OSError):
+        benchbox_datagen.write_refresh("tpch", 0.01, tmp_path, sets=3)
+    assert [p.name for p in tmp_path.iterdir()] == ["lineitem.tbl.u2"]

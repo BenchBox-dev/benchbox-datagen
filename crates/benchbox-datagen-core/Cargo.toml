@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 arrow.workspace = true
+parquet.workspace = true
 benchbox-datagen-writers.workspace = true
 tpcdsgen.workspace = true
 tpcdsgen-arrow.workspace = true
@@ -17,7 +18,8 @@ tpchgen.workspace = true
 tpchgen-arrow.workspace = true
 
 [dev-dependencies]
-parquet.workspace = true
+flate2 = "1"
+serde_json = "1"
 tempfile.workspace = true
 
 [lints]

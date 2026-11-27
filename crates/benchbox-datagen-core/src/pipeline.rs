@@ -75,7 +75,10 @@ pub(crate) fn ordered<T: Send, E: Send>(
                     let job = {
                         let mut state = shared.lock();
                         loop {
-                            if state.aborted || state.next_job >= jobs {
+                            if state.aborted
+                                || state.next_job >= jobs
+                                || cancel.load(Ordering::Relaxed)
+                            {
                                 return;
                             }
                             if state.next_job < state.next_output + window {
@@ -107,9 +110,6 @@ pub(crate) fn ordered<T: Send, E: Send>(
             let value = {
                 let mut state = shared.lock();
                 loop {
-                    if let Some(value) = state.ready.remove(&output) {
-                        break Some(value);
-                    }
                     if state.aborted {
                         break None;
                     }
@@ -118,6 +118,9 @@ pub(crate) fn ordered<T: Send, E: Send>(
                         state.aborted = true;
                         shared.changed.notify_all();
                         break None;
+                    }
+                    if let Some(value) = state.ready.remove(&output) {
+                        break Some(value);
                     }
                     state = shared
                         .changed
@@ -211,5 +214,35 @@ mod tests {
             |_| Ok(()),
         );
         assert_eq!(result, Err("cancelled"));
+    }
+
+    #[test]
+    fn cancellation_is_seen_before_the_next_ready_result_is_consumed() {
+        const WINDOW: usize = 8;
+        let cancel = AtomicBool::new(false);
+        let produced = std::sync::atomic::AtomicUsize::new(0);
+        let mut consumed = 0;
+        let result = ordered(
+            10_000,
+            4,
+            WINDOW,
+            &cancel,
+            || "cancelled",
+            |job| {
+                produced.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, &str>(job)
+            },
+            |_| {
+                consumed += 1;
+                while produced.load(Ordering::SeqCst) < 2 {
+                    thread::yield_now();
+                }
+                cancel.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(consumed, 1);
+        assert!(produced.load(Ordering::SeqCst) <= WINDOW);
     }
 }

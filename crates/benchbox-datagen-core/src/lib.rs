@@ -1,6 +1,7 @@
 mod generate;
 mod output;
 mod pipeline;
+mod qgen;
 mod refresh;
 mod schema;
 mod tpcds;
@@ -8,7 +9,10 @@ mod tpcds_update;
 mod tpch;
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
+use std::thread;
 
 use arrow::compute::cast;
 use arrow::datatypes::SchemaRef;
@@ -18,6 +22,7 @@ use arrow::record_batch::{RecordBatch, RecordBatchReader};
 pub use benchbox_datagen_writers::Compression;
 pub use generate::{KeyRange, TableScale};
 pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
+pub use qgen::{GeneratedQuery, QgenError, QueryRequest, generate_query};
 
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
 
@@ -30,6 +35,8 @@ pub enum Error {
     UnknownTable { benchmark: Benchmark, table: String },
     #[error("scale factor must be a positive finite number, got {0}")]
     InvalidScaleFactor(f64),
+    #[error("tpcds scale factors of 1 or more must be whole numbers, got {0}")]
+    NonIntegerScaleFactor(f64),
     #[error("part must be between 1 and parts ({parts}), got {part}")]
     InvalidPart { part: i32, parts: i32 },
     #[error("parts must be at least 1, got {0}")]
@@ -124,8 +131,20 @@ pub fn row_counts(
     benchmark: Benchmark,
     scale_factor: f64,
 ) -> Result<Vec<(&'static str, u64)>, Error> {
-    validate_scale_factor(scale_factor)?;
-    Ok(generate::row_counts(benchmark, scale_factor))
+    row_counts_cancellable(benchmark, scale_factor, None, &AtomicBool::new(false))
+}
+
+pub fn row_counts_cancellable(
+    benchmark: Benchmark,
+    scale_factor: f64,
+    threads: Option<NonZeroUsize>,
+    cancel: &AtomicBool,
+) -> Result<Vec<(&'static str, u64)>, Error> {
+    validate_scale_factor(benchmark, scale_factor)?;
+    let workers = threads
+        .or_else(|| thread::available_parallelism().ok())
+        .map_or(1, NonZeroUsize::get);
+    generate::row_counts(benchmark, scale_factor, workers, cancel)
 }
 
 pub fn write_refresh_sets(
@@ -134,8 +153,9 @@ pub fn write_refresh_sets(
     sets: i32,
     rng_seed: Option<i32>,
     output_dir: &std::path::Path,
+    cancel: &AtomicBool,
 ) -> Result<Vec<FileStats>, Error> {
-    validate_scale_factor(scale_factor)?;
+    validate_scale_factor(benchmark, scale_factor)?;
     if sets < 1 {
         return Err(Error::RefreshUnsupported(format!(
             "sets must be at least 1, got {sets}"
@@ -148,7 +168,7 @@ pub fn write_refresh_sets(
                     "tpch refresh sets do not take an rng seed".into(),
                 ));
             }
-            refresh::write_tpch_refresh(scale_factor, sets, output_dir)
+            refresh::write_tpch_refresh(scale_factor, sets, output_dir, cancel)
         }
         Benchmark::Tpcds => tpcds_update::write_tpcds_refresh(
             scale_factor,
@@ -160,18 +180,21 @@ pub fn write_refresh_sets(
 }
 
 pub fn table_scales(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<TableScale>, Error> {
-    validate_scale_factor(scale_factor)?;
+    validate_scale_factor(benchmark, scale_factor)?;
     Ok(generate::table_scales(benchmark, scale_factor))
 }
 
 pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
-    validate_scale_factor(scale_factor)?;
+    validate_scale_factor(benchmark, scale_factor)?;
     Ok(generate::key_ranges(benchmark, scale_factor))
 }
 
-pub(crate) fn validate_scale_factor(scale_factor: f64) -> Result<(), Error> {
+pub(crate) fn validate_scale_factor(benchmark: Benchmark, scale_factor: f64) -> Result<(), Error> {
     if !scale_factor.is_finite() || scale_factor <= 0.0 {
         return Err(Error::InvalidScaleFactor(scale_factor));
+    }
+    if benchmark == Benchmark::Tpcds && scale_factor >= 1.0 && scale_factor.fract() != 0.0 {
+        return Err(Error::NonIntegerScaleFactor(scale_factor));
     }
     Ok(())
 }
@@ -237,7 +260,7 @@ pub fn record_batches(request: &TableRequest) -> Result<BatchReader, Error> {
         part,
         parts,
     } = request;
-    validate_scale_factor(*scale_factor)?;
+    validate_scale_factor(*benchmark, *scale_factor)?;
     if *parts < 1 || *part < 1 || part > parts {
         return Err(Error::InvalidPart {
             part: *part,
@@ -440,6 +463,71 @@ mod tests {
             table_schema(Benchmark::Tpcds, "dbgen_version"),
             Err(Error::UnknownTable { .. })
         ));
+    }
+
+    #[test]
+    fn tpcds_upstream_field_names_equal_the_target_names() {
+        for table in Benchmark::Tpcds.tables() {
+            let upstream =
+                generate::batches(Benchmark::Tpcds, table, 1.0, &generate::Slice::Tpcds(1..=1))
+                    .schema();
+            let names: Vec<_> = upstream
+                .fields()
+                .iter()
+                .map(|field| field.name().replace("s_tax_precentage", "s_tax_percentage"))
+                .collect();
+            let target: Vec<_> = generate::schema(Benchmark::Tpcds, table)
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect();
+            assert_eq!(names, target, "{table}");
+        }
+    }
+
+    #[test]
+    fn tpcds_row_counts_stop_when_cancelled() {
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            row_counts_cancellable(Benchmark::Tpcds, 1.0, NonZeroUsize::new(2), &cancelled),
+            Err(Error::Cancelled)
+        );
+        assert_eq!(
+            row_counts_cancellable(Benchmark::Tpcds, 0.01, NonZeroUsize::new(2), &cancelled),
+            Err(Error::Cancelled)
+        );
+    }
+
+    #[test]
+    fn tpcds_scale_factors_of_one_or_more_must_be_whole_numbers() {
+        for scale_factor in [1.5, 2.5, 10.000001] {
+            assert_eq!(
+                row_counts(Benchmark::Tpcds, scale_factor),
+                Err(Error::NonIntegerScaleFactor(scale_factor))
+            );
+            assert_eq!(
+                table_scales(Benchmark::Tpcds, scale_factor),
+                Err(Error::NonIntegerScaleFactor(scale_factor))
+            );
+            assert!(matches!(
+                key_ranges(Benchmark::Tpcds, scale_factor),
+                Err(Error::NonIntegerScaleFactor(_))
+            ));
+            assert!(matches!(
+                record_batches(&TableRequest {
+                    benchmark: Benchmark::Tpcds,
+                    table: "item".into(),
+                    scale_factor,
+                    part: 1,
+                    parts: 1,
+                }),
+                Err(Error::NonIntegerScaleFactor(_))
+            ));
+        }
+        for scale_factor in [0.29, 2.0] {
+            assert!(row_counts(Benchmark::Tpcds, scale_factor).is_ok());
+        }
+        assert!(row_counts(Benchmark::Tpch, 1.5).is_ok());
     }
 
     #[test]
