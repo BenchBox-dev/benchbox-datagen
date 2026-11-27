@@ -1,0 +1,152 @@
+{
+ "aka_name": [
+  ["id", "int64", true],
+  ["person_id", "int64", false],
+  ["name", "string", false],
+  ["imdb_index", "string", true],
+  ["name_pcode_cf", "string", true],
+  ["name_pcode_nf", "string", true],
+  ["surname_pcode", "string", true],
+  ["md5sum", "string", true]
+ ],
+ "aka_title": [
+  ["id", "int64", true],
+  ["movie_id", "int64", false],
+  ["title", "string", false],
+  ["imdb_index", "string", true],
+  ["kind_id", "int64", false],
+  ["production_year", "int64", true],
+  ["phonetic_code", "string", true],
+  ["episode_of_id", "int64", true],
+  ["season_nr", "int64", true],
+  ["episode_nr", "int64", true],
+  ["note", "string", true],
+  ["md5sum", "string", true]
+ ],
+ "cast_info": [
+  ["id", "int64", true],
+  ["person_id", "int64", false],
+  ["movie_id", "int64", false],
+  ["person_role_id", "int64", true],
+  ["note", "string", true],
+  ["nr_order", "int64", true],
+  ["role_id", "int64", false]
+ ],
+ "char_name": [
+  ["id", "int64", true],
+  ["name", "string", false],
+  ["imdb_index", "string", true],
+  ["imdb_id", "int64", true],
+  ["name_pcode_nf", "string", true],
+  ["surname_pcode", "string", true],
+  ["md5sum", "string", true]
+ ],
+ "comp_cast_type": [
+  ["id", "int64", true],
+  ["kind", "string", false]
+ ],
+ "company_name": [
+  ["id", "int64", true],
+  ["name", "string", false],
+  ["country_code", "string", true],
+  ["imdb_id", "int64", true],
+  ["name_pcode_nf", "string", true],
+  ["name_pcode_sf", "string", true],
+  ["md5sum", "string", true]
+ ],
+ "company_type": [
+  ["id", "int64", true],
+  ["kind", "string", false]
+ ],
+ "complete_cast": [
+  ["id", "int64", true],
+  ["movie_id", "int64", true],
+  ["subject_id", "int64", false],
+  ["status_id", "int64", false]
+ ],
+ "info_type": [
+  ["id", "int64", true],
+  ["info", "string", false]
+ ],
+ "keyword": [
+  ["id", "int64", true],
+  ["keyword", "string", false],
+  ["phonetic_code", "string", true]
+ ],
+ "kind_type": [
+  ["id", "int64", true],
+  ["kind", "string", false]
+ ],
+ "link_type": [
+  ["id", "int64", true],
+  ["link", "string", false]
+ ],
+ "movie_companies": [
+  ["id", "int64", true],
+  ["movie_id", "int64", false],
+  ["company_id", "int64", false],
+  ["company_type_id", "int64", false],
+  ["note", "string", true]
+ ],
+ "movie_info": [
+  ["id", "int64", true],
+  ["movie_id", "int64", false],
+  ["info_type_id", "int64", false],
+  ["info", "string", false],
+  ["note", "string", true]
+ ],
+ "movie_info_idx": [
+  ["id", "int64", true],
+  ["movie_id", "int64", false],
+  ["info_type_id", "int64", false],
+  ["info", "string", false],
+  ["note", "string", true]
+ ],
+ "movie_keyword": [
+  ["id", "int64", true],
+  ["movie_id", "int64", false],
+  ["keyword_id", "int64", false]
+ ],
+ "movie_link": [
+  ["id", "int64", true],
+  ["movie_id", "int64", false],
+  ["linked_movie_id", "int64", false],
+  ["link_type_id", "int64", false]
+ ],
+ "name": [
+  ["id", "int64", true],
+  ["name", "string", false],
+  ["imdb_index", "string", true],
+  ["imdb_id", "int64", true],
+  ["gender", "string", true],
+  ["name_pcode_cf", "string", true],
+  ["name_pcode_nf", "string", true],
+  ["surname_pcode", "string", true],
+  ["md5sum", "string", true]
+ ],
+ "person_info": [
+  ["id", "int64", true],
+  ["person_id", "int64", false],
+  ["info_type_id", "int64", false],
+  ["info", "string", false],
+  ["note", "string", true]
+ ],
+ "role_type": [
+  ["id", "int64", true],
+  ["role", "string", false]
+ ],
+ "title": [
+  ["id", "int64", true],
+  ["title", "string", false],
+  ["imdb_index", "string", true],
+  ["kind_id", "int64", false],
+  ["production_year", "int64", true],
+  ["imdb_id", "int64", true],
+  ["phonetic_code", "string", true],
+  ["episode_of_id", "int64", true],
+  ["season_nr", "int64", true],
+  ["episode_nr", "int64", true],
+  ["series_years", "string", true],
+  ["md5sum", "string", true]
+ ]
+}

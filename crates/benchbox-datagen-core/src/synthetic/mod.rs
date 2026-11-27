@@ -1,5 +1,6 @@
 pub(crate) mod calendar;
 pub(crate) mod delimited;
+mod joinorder_synthetic;
 pub(crate) mod rng;
 mod ssb;
 
@@ -66,6 +67,7 @@ pub(crate) trait Generator: Sync {
 #[rustfmt::skip]
 const REGISTRY: &[&dyn Generator] = &[
     &ssb::Ssb,
+    &joinorder_synthetic::JoinorderSynthetic,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
