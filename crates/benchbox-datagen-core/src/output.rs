@@ -617,7 +617,7 @@ mod tests {
             for table in tables {
                 let total = crate::tpcds::source_rows(table, 1.0);
                 let mut step = total.div_ceil(11).max(5);
-                while step % 2 == 0 || step % 3 == 0 {
+                while step.is_multiple_of(2) || step.is_multiple_of(3) {
                     step += 1;
                 }
                 assert!(generate::plan(Benchmark::Tpcds, table, 1.0, Some(step)).len() > 1);
