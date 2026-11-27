@@ -220,6 +220,20 @@ being skipped. Legacy files are read by the config's `legacy_suffix` (default
 `tests/test_synthetic_acceptance_types.py` runs the whole statistic and compare
 path on a CSV/Parquet fixture that has every kind.
 
+`table_scales(benchmark, scale_factor)` reports each table's `id_count` and `source_rows`.
+`active_locations("tpcds", scale_factor)` returns the dsqgen `rowcount()` inputs
+`active_cities`, `active_counties` and `active_states` (TPC-DS only; TPC-H and SSB raise
+`ValueError`). They equal what the patched `dsqgen` returns for `rowcount("active_cities")`
+and friends at integer scale factors of 1 or more, and below 1 they are 1, the value the
+patched `dsdgen` store, call center, warehouse and web site addresses draw from. Templates
+apply `rowcount("active_x", "store")`, which is the smaller of the value and the store
+`id_count`.
+
+`key_ranges` has no entries for the six returns tables. Their order and ticket numbers
+are a data-dependent subset of the matching sales range, so no exact bounds exist
+without generating the returns rows; the bounds of the sales range would be only a
+superset, and are left out so that every reported range is exact.
+
 ## Adding a synthetic generator
 
 A synthetic generator is one Rust module plus one registry entry (one line),

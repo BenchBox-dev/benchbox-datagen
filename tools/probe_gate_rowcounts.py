@@ -12,9 +12,14 @@ define RS = rowcount("reason");
 define WS = rowcount("web_sales");
 define CS = rowcount("catalog_sales");
 define CU = rowcount("customer");
-select [SS], [ST], [CC], [RS], [WS], [CS], [CU];
+define AC = rowcount("active_cities");
+define AN = rowcount("active_counties");
+define AS = rowcount("active_states");
+select [SS], [ST], [CC], [RS], [WS], [CS], [CU], [AC], [AN], [AS];
 """
-KEYS = ["store_sales", "store", "call_center", "reason", "web_sales", "catalog_sales", "customer"]
+KEYS = ["store_sales", "store", "call_center", "reason", "web_sales", "catalog_sales", "customer", "active_cities", "active_counties", "active_states"]
+SCHEMA = Path(__file__).resolve().parent.parent / "crates/benchbox-datagen-core/src/tpcds_schema.txt"
+SMALL_DIMENSIONS = ("store", "call_center", "warehouse", "web_site")
 INTEGER_SCALES = [1, 10, 100, 1000, 3000]
 FRACTIONAL_SCALES = ["0.01", "0.05", "0.1", "0.25", "0.5"]
 
@@ -55,6 +60,21 @@ def from_dsdgen(directory: Path) -> dict[str, int]:
                 highest = max(highest, int(line.split("|")[column]))
         return highest
 
+    columns: dict[str, list[str]] = {}
+    for line in SCHEMA.read_text().splitlines():
+        parts = line.split()
+        if parts:
+            columns.setdefault(parts[0], []).append(parts[1])
+    seen: dict[str, set[str]] = {"city": set(), "county": set(), "state": set()}
+    for table in SMALL_DIMENSIONS:
+        positions = {kind: next(i for i, name in enumerate(columns[table]) if name.endswith(f"_{kind}")) for kind in seen}
+        with (directory / f"{table}.dat").open(encoding="latin-1") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split("|")
+                for kind, position in positions.items():
+                    if fields[position]:
+                        seen[kind].add(fields[position])
+
     return {
         "store_sales": tickets("store_sales", 9),
         "store": history_ids(lines("store")),
@@ -63,6 +83,9 @@ def from_dsdgen(directory: Path) -> dict[str, int]:
         "web_sales": tickets("web_sales", 17),
         "catalog_sales": tickets("catalog_sales", 17),
         "customer": lines("customer"),
+        "active_cities": len(seen["city"]),
+        "active_counties": len(seen["county"]),
+        "active_states": len(seen["state"]),
     }
 
 
