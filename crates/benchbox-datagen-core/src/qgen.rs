@@ -409,29 +409,8 @@ struct CommentStripper {
 impl CommentStripper {
     fn strip(&mut self, line: &str) -> String {
         let mut text = line.to_owned();
-        if !self.in_comment
-            && let Some(dash) = text.find('-')
-            && text.as_bytes().get(dash + 1) == Some(&b'-')
-        {
-            text.truncate(dash);
-        }
         loop {
-            if !self.in_comment {
-                let Some(open) = text.find('{') else {
-                    return text;
-                };
-                self.in_comment = true;
-                match text[open + 1..].find('}') {
-                    Some(close) => {
-                        text.replace_range(..open + 1 + close + 1, "");
-                        self.in_comment = false;
-                    }
-                    None => {
-                        text.clear();
-                        return text;
-                    }
-                }
-            } else {
+            if self.in_comment {
                 match text.find('}') {
                     Some(close) => {
                         text.replace_range(..=close, "");
@@ -441,6 +420,20 @@ impl CommentStripper {
                         text.clear();
                         return text;
                     }
+                }
+            } else {
+                if let Some(dash) = text.find('-')
+                    && text.as_bytes().get(dash + 1) == Some(&b'-')
+                {
+                    text.truncate(dash);
+                    return text;
+                }
+                match text.find('{') {
+                    Some(open) => {
+                        text.replace_range(open..=open, " ");
+                        self.in_comment = true;
+                    }
+                    None => return text,
                 }
             }
         }
@@ -601,8 +594,13 @@ mod tests {
         assert_eq!(stripper.strip("a - b -- c\n"), "a - b -- c\n");
         assert_eq!(stripper.strip("a { x } b { y } c\n"), " c\n");
         assert!(!stripper.in_comment);
-        assert_eq!(stripper.strip("a { -- } b\n"), "");
-        assert!(stripper.in_comment);
+        assert_eq!(stripper.strip("a { -- } b\n"), "a { ");
+        assert!(!stripper.in_comment);
+        assert_eq!(stripper.strip("{x} a -- c\n"), "{x} a ");
+        assert_eq!(stripper.strip("{ - } a -- c\n"), " a ");
+        assert_eq!(stripper.strip("open {\n"), "");
+        assert_eq!(stripper.strip("x } a -- b\n"), " a ");
+        assert!(!stripper.in_comment);
     }
 
     #[test]
