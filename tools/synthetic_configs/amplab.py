@@ -1,8 +1,20 @@
 import random
+import re
 from pathlib import Path
 
 from synthetic_configs.base import SyntheticConfig
 
+USERVISITS_KEY = [
+    "sourceIP",
+    "destURL",
+    "visitDate",
+    "adRevenue",
+    "userAgent",
+    "countryCode",
+    "languageCode",
+    "searchWord",
+    "duration",
+]
 BASE_ROWS = {"rankings": 250_000, "uservisits": 2_500_000, "documents": 125_000}
 
 
@@ -18,10 +30,16 @@ def legacy_generate(scale_factor: float, seed: int, out: Path) -> None:
     generator.generate_data()
 
 
+MIXED_CASE_COLUMNS = re.compile(
+    r"\b(pageURL|pageRank|avgDuration|sourceIP|destURL|visitDate|adRevenue|userAgent|countryCode|languageCode|searchWord)\b"
+)
+
+
 def queries() -> dict[str, str]:
     from benchbox.core.amplab.queries import AMPLabQueryManager
 
-    return AMPLabQueryManager().get_all_queries()
+    texts = AMPLabQueryManager().get_all_queries()
+    return {query_id: MIXED_CASE_COLUMNS.sub(r'"\1"', sql) for query_id, sql in texts.items()}
 
 
 def benchbox_schema() -> dict:
@@ -33,7 +51,7 @@ def benchbox_schema() -> dict:
 CONFIG = SyntheticConfig(
     name="amplab",
     tables=["rankings", "documents", "uservisits"],
-    primary_keys={"rankings": ["pageURL"], "documents": ["url"], "uservisits": []},
+    primary_keys={"rankings": ["pageURL"], "documents": ["url"], "uservisits": USERVISITS_KEY},
     foreign_keys=[],
     expected_rows=expected_rows,
     queries=queries,
