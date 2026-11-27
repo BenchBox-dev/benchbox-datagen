@@ -278,6 +278,16 @@ apart from line endings: the legacy writer emits CRLF, the library `\n`.
 frozen goldens in `crates/benchbox-datagen-core/tests/coffeeshop.rs`. The
 dimension files are embedded from `crates/benchbox-datagen-core/src/synthetic/coffeeshop_data/`.
 
+The acceptance queries are BenchBox's eleven queries with default parameters; TM1
+casts the stored `order_time` text with `CAST(ol.order_time AS TIME)` because the
+Arrow schema carries `TIME` as `utf8`. Dual-engine verification runs at scale
+factors 0.01, 0.1 and 1: at SF 10 DuckDB and DataFusion together exceed the 8 GiB
+heavy-work limit, so SF 10 is covered by the row-count tests and the wall-time and
+peak-RSS measurements. DuckDB and DataFusion return the same row count for every
+query; their values differ only where DataFusion divides decimals at scale 6 and
+where it divides integers (`SUM(quantity) / COUNT(DISTINCT order_id)` in SA3 and
+QC1).
+
 ## Adding a synthetic generator
 
 A synthetic generator is one Rust module plus one registry entry (one line),

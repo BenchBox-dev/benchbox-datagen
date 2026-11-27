@@ -62,6 +62,7 @@ CONFIG = SyntheticConfig(
     legacy_suffix="csv",
     legacy_delimiter=",",
     legacy_header=False,
+    verify_scales=(0.01, 0.1, 1.0),
     budgets={
         (1.0, "tbl"): (15.0, 512),
         (1.0, "parquet"): (15.0, 512),
