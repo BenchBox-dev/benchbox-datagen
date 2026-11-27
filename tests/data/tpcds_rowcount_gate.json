@@ -6,7 +6,10 @@
   "reason": 75,
   "web_sales": 60000,
   "catalog_sales": 160000,
-  "customer": 100000
+  "customer": 100000,
+  "active_cities": 2,
+  "active_counties": 1,
+  "active_states": 1
  },
  "10": {
   "store_sales": 2400000,
@@ -15,7 +18,10 @@
   "reason": 75,
   "web_sales": 600000,
   "catalog_sales": 1600000,
-  "customer": 500000
+  "customer": 500000,
+  "active_cities": 6,
+  "active_counties": 3,
+  "active_states": 3
  },
  "100": {
   "store_sales": 24000000,
@@ -24,7 +30,10 @@
   "reason": 75,
   "web_sales": 6000000,
   "catalog_sales": 16000000,
-  "customer": 2000000
+  "customer": 2000000,
+  "active_cities": 18,
+  "active_counties": 9,
+  "active_states": 9
  },
  "1000": {
   "store_sales": 240000000,
@@ -33,7 +42,10 @@
   "reason": 75,
   "web_sales": 60000000,
   "catalog_sales": 160000000,
-  "customer": 12000000
+  "customer": 12000000,
+  "active_cities": 54,
+  "active_counties": 27,
+  "active_states": 21
  },
  "3000": {
   "store_sales": 720000000,
@@ -42,7 +54,10 @@
   "reason": 75,
   "web_sales": 180000000,
   "catalog_sales": 480000000,
-  "customer": 30000000
+  "customer": 30000000,
+  "active_cities": 90,
+  "active_counties": 45,
+  "active_states": 29
  },
  "0.01": {
   "store_sales": 2400,
@@ -51,7 +66,10 @@
   "reason": 1,
   "web_sales": 600,
   "catalog_sales": 1600,
-  "customer": 1000
+  "customer": 1000,
+  "active_cities": 1,
+  "active_counties": 1,
+  "active_states": 1
  },
  "0.05": {
   "store_sales": 12000,
@@ -60,7 +78,10 @@
   "reason": 3,
   "web_sales": 3000,
   "catalog_sales": 8000,
-  "customer": 5000
+  "customer": 5000,
+  "active_cities": 1,
+  "active_counties": 1,
+  "active_states": 1
  },
  "0.1": {
   "store_sales": 24000,
@@ -69,7 +90,10 @@
   "reason": 7,
   "web_sales": 6000,
   "catalog_sales": 16000,
-  "customer": 10000
+  "customer": 10000,
+  "active_cities": 1,
+  "active_counties": 1,
+  "active_states": 1
  },
  "0.25": {
   "store_sales": 60000,
@@ -78,7 +102,10 @@
   "reason": 18,
   "web_sales": 15000,
   "catalog_sales": 40000,
-  "customer": 25000
+  "customer": 25000,
+  "active_cities": 1,
+  "active_counties": 1,
+  "active_states": 1
  },
  "0.5": {
   "store_sales": 120000,
@@ -87,6 +114,9 @@
   "reason": 37,
   "web_sales": 30000,
   "catalog_sales": 80000,
-  "customer": 50000
+  "customer": 50000,
+  "active_cities": 1,
+  "active_counties": 1,
+  "active_states": 1
  }
 }

@@ -199,6 +199,41 @@ def test_dsqgen_rowcount_inputs_equal_the_patched_dsdgen_values(scale):
         assert scales[table]["source_rows"] == expected[table], table
 
 
+@pytest.mark.parametrize("scale", list(GATE))
+def test_active_locations_equal_the_dsdgen_derived_and_dsqgen_probed_values(scale):
+    expected = GATE[scale]
+    assert benchbox_datagen.active_locations("tpcds", float(scale)) == {
+        "active_cities": expected["active_cities"],
+        "active_counties": expected["active_counties"],
+        "active_states": expected["active_states"],
+    }
+
+
+@pytest.mark.parametrize("scale", list(GATE))
+def test_generated_small_dimension_addresses_cover_exactly_the_active_locations(scale):
+    active = benchbox_datagen.active_locations("tpcds", float(scale))
+    seen = {"city": set(), "county": set(), "state": set()}
+    for table, prefix in (
+        ("store", "s"),
+        ("call_center", "cc"),
+        ("warehouse", "w"),
+        ("web_site", "web"),
+    ):
+        data = pa.RecordBatchReader.from_stream(
+            benchbox_datagen.generate_table("tpcds", table, float(scale))
+        ).read_all()
+        for kind in seen:
+            seen[kind] |= set(data[f"{prefix}_{kind}"].drop_null().to_pylist())
+    assert len(seen["city"]) == active["active_cities"]
+    assert len(seen["county"]) == active["active_counties"]
+    assert len(seen["state"]) == active["active_states"]
+
+
+def test_active_locations_are_not_defined_for_tpch():
+    with pytest.raises(ValueError, match="no active location counts"):
+        benchbox_datagen.active_locations("tpch", 1.0)
+
+
 @pytest.mark.parametrize("scale", [1.5, 2.5])
 def test_non_integer_scale_factors_of_one_or_more_are_rejected(scale):
     with pytest.raises(ValueError, match="whole numbers"):

@@ -3,6 +3,7 @@ use std::ops::RangeInclusive;
 
 use benchbox_datagen_writers::DelimitedBuffer;
 use tpcdsgen::config::{CompatMode, Scaling, Session, SessionBuilder, Table};
+use tpcdsgen::pseudo_table_scaling_infos::PseudoTableScalingInfos;
 use tpcdsgen::row::{
     CallCenterRowGenerator, CatalogPageRowGenerator, CatalogReturnsRowGenerator,
     CatalogSalesRowGenerator, CustomerAddressRowGenerator, CustomerDemographicsRowGenerator,
@@ -12,6 +13,7 @@ use tpcdsgen::row::{
     StoreSalesRowGenerator, TimeDimRowGenerator, WarehouseRowGenerator, WebPageRowGenerator,
     WebReturnsRowGenerator, WebSalesRowGenerator, WebSiteRowGenerator,
 };
+use tpcdsgen::scaling_info::{ScalingInfo, ScalingModel};
 use tpcdsgen_arrow::{
     CallCenterArrow, CatalogPageArrow, CatalogReturnsArrow, CatalogSalesArrow,
     CustomerAddressArrow, CustomerArrow, CustomerDemographicsArrow, DateDimArrow,
@@ -118,6 +120,30 @@ const STATIC_BELOW_ONE: [&str; 6] = [
 
 fn upstream_rows(name: &str, scale_factor: f64) -> u64 {
     Scaling::new_with_compat(scale_factor, CompatMode::C).get_row_count(table(name))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveLocations {
+    pub cities: u64,
+    pub counties: u64,
+    pub states: u64,
+}
+
+pub(crate) fn active_locations(scale_factor: f64) -> ActiveLocations {
+    let states = ScalingInfo::new(
+        0,
+        ScalingModel::Logarithmic,
+        &[0, 1, 3, 9, 13, 21, 29, 34, 42, 47],
+        0,
+    )
+    .and_then(|info| info.get_row_count_for_scale(scale_factor))
+    .expect("the active states scaling table is valid for every validated scale factor");
+    ActiveLocations {
+        cities: PseudoTableScalingInfos::get_active_cities_row_count_for_scale(scale_factor) as u64,
+        counties: PseudoTableScalingInfos::get_active_counties_row_count_for_scale(scale_factor)
+            as u64,
+        states: states as u64,
+    }
 }
 
 pub(crate) fn history_ids(rows: u64) -> u64 {

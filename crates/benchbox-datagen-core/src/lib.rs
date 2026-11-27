@@ -23,6 +23,7 @@ pub use benchbox_datagen_writers::Compression;
 pub use generate::{KeyRange, TableScale};
 pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
 pub use qgen::{GeneratedQuery, QgenError, QueryRequest, generate_query};
+pub use tpcds::ActiveLocations;
 
 pub type BatchReader = Box<dyn RecordBatchReader + Send>;
 
@@ -56,6 +57,8 @@ pub enum Error {
     SeedNotSupported(Benchmark),
     #[error("{0}")]
     RefreshUnsupported(String),
+    #[error("{0} has no active location counts")]
+    NoActiveLocations(Benchmark),
     #[error("generation was cancelled")]
     Cancelled,
 }
@@ -198,6 +201,14 @@ pub fn write_refresh_sets(
 pub fn table_scales(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<TableScale>, Error> {
     validate_scale_factor(benchmark, scale_factor)?;
     Ok(generate::table_scales(benchmark, scale_factor))
+}
+
+pub fn active_locations(benchmark: Benchmark, scale_factor: f64) -> Result<ActiveLocations, Error> {
+    validate_scale_factor(benchmark, scale_factor)?;
+    match benchmark {
+        Benchmark::Tpcds => Ok(tpcds::active_locations(scale_factor)),
+        Benchmark::Tpch | Benchmark::Ssb => Err(Error::NoActiveLocations(benchmark)),
+    }
 }
 
 pub fn key_ranges(benchmark: Benchmark, scale_factor: f64) -> Result<Vec<KeyRange>, Error> {
@@ -569,6 +580,34 @@ mod tests {
             assert!(row_counts(Benchmark::Tpcds, scale_factor).is_ok());
             assert!(key_ranges(Benchmark::Tpcds, scale_factor).is_ok());
         }
+    }
+
+    #[test]
+    fn tpcds_active_locations_follow_the_dsqgen_values() {
+        let found: Vec<(u64, u64, u64)> = [0.01, 0.5, 1.0, 10.0, 100.0, 1000.0, 3000.0]
+            .into_iter()
+            .map(|scale_factor| {
+                let active = active_locations(Benchmark::Tpcds, scale_factor).unwrap();
+                (active.cities, active.counties, active.states)
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (1, 1, 1),
+                (1, 1, 1),
+                (2, 1, 1),
+                (6, 3, 3),
+                (18, 9, 9),
+                (54, 27, 21),
+                (90, 45, 29)
+            ]
+        );
+        assert_eq!(
+            active_locations(Benchmark::Tpch, 1.0),
+            Err(Error::NoActiveLocations(Benchmark::Tpch))
+        );
+        assert!(active_locations(Benchmark::Tpcds, 1.5).is_err());
     }
 
     #[test]
