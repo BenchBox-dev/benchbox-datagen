@@ -87,17 +87,14 @@ pub(crate) struct Pass {
 
 #[derive(Debug, Clone)]
 pub(crate) enum KeyPermutation {
-    Dense { values: Vec<u32>, shuffled: u64 },
+    Dense(Vec<u32>),
     Lazy { size: u64, passes: Vec<Pass> },
 }
 
 impl KeyPermutation {
     pub(crate) fn new(size: u64) -> Self {
         if size <= DENSE_LIMIT {
-            Self::Dense {
-                values: (0..size as u32).collect(),
-                shuffled: 0,
-            }
+            Self::Dense((0..size as u32).collect())
         } else {
             Self::Lazy {
                 size,
@@ -108,22 +105,14 @@ impl KeyPermutation {
 
     pub(crate) fn size(&self) -> u64 {
         match self {
-            Self::Dense { values, .. } => values.len() as u64,
+            Self::Dense(values) => values.len() as u64,
             Self::Lazy { size, .. } => *size,
-        }
-    }
-
-    pub(crate) fn shuffles(&self) -> u64 {
-        match self {
-            Self::Dense { shuffled, .. } => *shuffled,
-            Self::Lazy { passes, .. } => passes.len() as u64,
         }
     }
 
     pub(crate) fn shuffle(&mut self, rng: &mut Rng) {
         match self {
-            Self::Dense { values, shuffled } => {
-                *shuffled += 1;
+            Self::Dense(values) => {
                 let size = values.len() as i64;
                 for index in 0..values.len() {
                     let other = rng.integer(0, size - 1) as usize;
@@ -147,7 +136,7 @@ impl KeyPermutation {
 
     pub(crate) fn entry(&self, index: u64) -> Option<u64> {
         match self {
-            Self::Dense { values, .. } => values.get(index as usize).map(|value| u64::from(*value)),
+            Self::Dense(values) => values.get(index as usize).map(|value| u64::from(*value)),
             Self::Lazy { size, passes } => {
                 if index >= *size {
                     return None;
@@ -225,10 +214,7 @@ mod tests {
             (0, 1_100_000, 2),
         ] {
             let mut dense_rng = Rng::new(seed);
-            let mut dense = KeyPermutation::Dense {
-                values: (0..size as u32).collect(),
-                shuffled: 0,
-            };
+            let mut dense = KeyPermutation::Dense((0..size as u32).collect());
             let mut lazy_rng = Rng::new(seed);
             let mut lazy = KeyPermutation::Lazy {
                 size,

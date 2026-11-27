@@ -336,7 +336,7 @@ fn distribution_bytes(source: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (benchmark, query, template_text, distributions_text, scale_factor, seed = None, stream = None, default_params = false, dialect_text = None, parameters = None, log_run = false))]
+#[pyo3(signature = (benchmark, query, template_text, distributions_text, scale_factor, seed = None, stream = None, default_params = false, dialect_text = None, parameters = None))]
 #[allow(clippy::too_many_arguments)]
 fn generate_query<'py>(
     py: Python<'py>,
@@ -350,7 +350,6 @@ fn generate_query<'py>(
     default_params: bool,
     dialect_text: Option<&str>,
     parameters: Option<Vec<(String, String)>>,
-    log_run: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     match benchmark {
         "tpch" => {
@@ -384,7 +383,6 @@ fn generate_query<'py>(
                 seed,
                 stream,
                 parameters: parameters.as_deref(),
-                log_run,
             })
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
             let params = PyDict::new(py);
@@ -403,7 +401,7 @@ type StreamQuery = (String, String, Vec<(String, String)>);
 type StreamsResult = (String, Vec<(u32, Vec<StreamQuery>)>);
 
 #[pyfunction]
-#[pyo3(signature = (templates, dialect_text, distributions, scale_factor, seed = None, streams = 1, qualify = false, log_run = false))]
+#[pyo3(signature = (templates, dialect_text, distributions, scale_factor, seed = None, streams = 1, qualify = false))]
 #[allow(clippy::too_many_arguments)]
 fn generate_tpcds_streams(
     templates: Vec<(String, String)>,
@@ -413,7 +411,6 @@ fn generate_tpcds_streams(
     seed: Option<i64>,
     streams: u32,
     qualify: bool,
-    log_run: bool,
 ) -> PyResult<StreamsResult> {
     let distributions = distribution_bytes(distributions)?;
     let sources: Vec<TemplateSource<'_>> = templates
@@ -428,7 +425,6 @@ fn generate_tpcds_streams(
         seed,
         streams,
         qualify,
-        log_run,
     })
     .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let streams = output

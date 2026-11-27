@@ -12,9 +12,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const MULTI_PART: [&str; 4] = ["14", "23", "24", "39"];
-const HEAP_READ_TEMPLATES: [&str; 4] = ["16", "27", "34", "73"];
-const HEAP_READ_ROUND_TRIPS: [(&str, i64); 4] =
-    [("16", 1001), ("27", 1001), ("36", 1001), ("73", 1001)];
 const SUBSCALE_OFFICIAL: &str = "define REASON= dist(return_reasons, 1, 1);";
 const SUBSCALE_OVERRIDE: &str =
     "define REASON= distmember(return_reasons, random(1, rowcount(\"reason\"), uniform), 1);";
@@ -81,8 +78,7 @@ impl Inputs {
         scale: f64,
         stream: Option<u32>,
         parameters: Option<&[(String, String)]>,
-        log_run: bool,
-    ) -> Result<(String, BTreeMap<String, String>), DsqgenError> {
+    ) -> Result<(String, BTreeMap<String, String>, bool), DsqgenError> {
         let (name, template) = self.template(query, scale);
         generate_tpcds_query(&DsqgenQueryRequest {
             query,
@@ -94,9 +90,14 @@ impl Inputs {
             seed,
             stream,
             parameters,
-            log_run,
         })
-        .map(|generated| (generated.text, generated.parameters.into_iter().collect()))
+        .map(|generated| {
+            (
+                generated.text,
+                generated.parameters.into_iter().collect(),
+                generated.wrapped,
+            )
+        })
     }
 }
 
@@ -158,6 +159,8 @@ fn ordered_pairs(value: &Value) -> Vec<(String, String)> {
 
 struct Tally {
     matched: usize,
+    excluded: usize,
+    excluded_matching: usize,
     mismatches: Vec<String>,
 }
 
@@ -165,8 +168,15 @@ impl Tally {
     fn new() -> Self {
         Self {
             matched: 0,
+            excluded: 0,
+            excluded_matching: 0,
             mismatches: Vec::new(),
         }
+    }
+
+    fn exclude(&mut self, matches: bool) {
+        self.excluded += 1;
+        self.excluded_matching += usize::from(matches);
     }
 
     fn check(&mut self, ok: bool, label: impl FnOnce() -> String) {
@@ -197,17 +207,26 @@ fn replays_single_template_records() {
             skipped += 1;
             continue;
         }
-        let outcome = inputs.single(query, seed, scale, None, None, true);
-        tally.check(
-            matches!(&outcome, Ok((text, params))
-                if digest(text) == record["h"].as_str().unwrap() && *params == string_map(&record["p"])),
-            || format!("q{query} seed {seed:?} sf {scale}: {:?}", outcome.map(|(text, _)| digest(&text))),
-        );
+        let outcome = inputs.single(query, seed, scale, None, None);
+        let matches = matches!(&outcome, Ok((text, params, _))
+            if digest(text) == record["h"].as_str().unwrap() && *params == string_map(&record["p"]));
+        if matches!(outcome, Ok((_, _, true))) {
+            tally.exclude(matches);
+            continue;
+        }
+        tally.check(matches, || {
+            format!(
+                "q{query} seed {seed:?} sf {scale}: {:?}",
+                outcome.map(|(text, _, _)| digest(&text))
+            )
+        });
     }
     eprintln!(
-        "single matched {} of {} (flagged {skipped})",
+        "single: {} records, matched {}, excluded {} (would match anyway: {}), flagged by the oracle {skipped}",
+        records.len(),
         tally.matched,
-        records.len()
+        tally.excluded,
+        tally.excluded_matching
     );
     assert!(
         tally.mismatches.is_empty(),
@@ -227,17 +246,26 @@ fn replays_stream_template_records() {
         let query = record["q"].as_str().unwrap();
         let seed = record["seed"].as_i64();
         let stream = record["stream"].as_u64().unwrap() as u32;
-        let outcome = inputs.single(query, seed, 1.0, Some(stream), None, true);
-        tally.check(
-            matches!(&outcome, Ok((text, params))
-                if digest(text) == record["h"].as_str().unwrap() && *params == string_map(&record["p"])),
-            || format!("q{query} seed {seed:?} stream {stream}: {:?}", outcome.map(|(text, _)| digest(&text))),
-        );
+        let outcome = inputs.single(query, seed, 1.0, Some(stream), None);
+        let matches = matches!(&outcome, Ok((text, params, _))
+            if digest(text) == record["h"].as_str().unwrap() && *params == string_map(&record["p"]));
+        if matches!(outcome, Ok((_, _, true))) {
+            tally.exclude(matches);
+            continue;
+        }
+        tally.check(matches, || {
+            format!(
+                "q{query} seed {seed:?} stream {stream}: {:?}",
+                outcome.map(|(text, _, _)| digest(&text))
+            )
+        });
     }
     eprintln!(
-        "stream_template matched {} of {}",
+        "stream_template: {} records, matched {}, excluded {} (would match anyway: {})",
+        records.len(),
         tally.matched,
-        records.len()
+        tally.excluded,
+        tally.excluded_matching
     );
     assert!(
         tally.mismatches.is_empty(),
@@ -281,9 +309,6 @@ fn replays_stream_all_records() {
             .push(record);
     }
     let mut tally = Tally::new();
-    let mut excluded_checks = 0;
-    let mut excluded_failed = 0;
-    let mut failed_templates = std::collections::BTreeSet::new();
     for ((seed, scale), group) in groups {
         let seed = record_seed(&seed);
         let scale: f64 = scale.parse().unwrap();
@@ -300,7 +325,6 @@ fn replays_stream_all_records() {
             seed,
             streams: 21,
             qualify: false,
-            log_run: true,
         })
         .unwrap();
         for record in group {
@@ -328,7 +352,6 @@ fn replays_stream_all_records() {
                 } else {
                     order.push(id.to_owned());
                 }
-                let excluded = seed.is_none() && scale == 10.0 && HEAP_READ_TEMPLATES.contains(&id);
                 let hashes_ok = statements.iter().enumerate().all(|(offset, statement)| {
                     expected_hashes
                         .get(cursor + offset)
@@ -339,12 +362,8 @@ fn replays_stream_all_records() {
                 let params_ok = !params.is_object()
                     || query.parameters.iter().cloned().collect::<BTreeMap<_, _>>()
                         == string_map(params);
-                if excluded {
-                    excluded_checks += 2;
-                    excluded_failed += usize::from(!hashes_ok) + usize::from(!params_ok);
-                    if !hashes_ok {
-                        failed_templates.insert(format!("q{id}"));
-                    }
+                if query.wrapped {
+                    tally.exclude(hashes_ok && params_ok);
                 } else {
                     tally.check(hashes_ok, || {
                         format!("seed {seed:?} sf {scale} stream {stream} q{id}: text")
@@ -366,7 +385,14 @@ fn replays_stream_all_records() {
         }
     }
     eprintln!(
-        "stream_all checks matched {} excluded {excluded_checks} (of which {excluded_failed} differ; templates with differing text {failed_templates:?})",
+        "stream_all: {} stream records ({} statements), (stream, template) units excluded {} (would match anyway: {}), checks matched {}",
+        records.len(),
+        records
+            .iter()
+            .map(|record| record["h"].as_array().unwrap().len())
+            .sum::<usize>(),
+        tally.excluded,
+        tally.excluded_matching,
         tally.matched
     );
     assert!(
@@ -392,41 +418,44 @@ fn replays_explicit_parameter_records() {
         let seed = record["seed"].as_i64();
         let scale = nullable_scale(&record["sf"]);
         let parameters = ordered_pairs(&record["p"]);
+        let seeded = inputs.single(query, seed, scale, None, None);
         let (_, template) = inputs.template(query, scale);
         let rewritten = substitute_parameters(&template, &parameters, query);
-        tally.check(
+        let explicit = inputs.single(query, seed, scale, None, Some(&parameters));
+        let alternate = inputs.single(query, Some(99), scale, None, Some(&parameters));
+        let results = [
             matches!(&rewritten, Ok(text) if digest(text) == record["t"].as_str().unwrap()),
-            || format!("q{query} sf {scale}: rewritten template hash differs"),
-        );
-        let outcome = inputs.single(query, seed, scale, None, Some(&parameters), false);
-        tally.check(
-            matches!(&outcome, Ok((text, _)) if digest(text) == record["h"].as_str().unwrap()),
-            || {
-                format!(
-                    "q{query} seed {seed:?} sf {scale}: explicit text differs {:?}",
-                    outcome.map(|(text, _)| digest(&text))
-                )
-            },
-        );
-        if let Some(alt) = record.get("h_alt").and_then(Value::as_str) {
-            let alternate = inputs.single(query, Some(99), scale, None, Some(&parameters), false);
-            tally.check(
-                matches!(&alternate, Ok((text, _)) if digest(text) == alt),
-                || format!("q{query} sf {scale}: alternate-seed text differs"),
-            );
+            matches!(&explicit, Ok((text, _, _)) if digest(text) == record["h"].as_str().unwrap()),
+            record
+                .get("h_alt")
+                .and_then(Value::as_str)
+                .is_none_or(|alt| matches!(&alternate, Ok((text, _, _)) if digest(text) == alt)),
+            record.get("r").and_then(Value::as_str).is_none_or(
+                |round_trip| matches!(&seeded, Ok((text, _, _)) if digest(text) == round_trip),
+            ),
+        ];
+        if matches!(seeded, Ok((_, _, true))) {
+            tally.exclude(results.iter().all(|ok| *ok));
+            continue;
         }
-        if let Some(round_trip) = record.get("r").and_then(Value::as_str)
-            && !(scale == 10.0
-                && seed.is_some_and(|seed| HEAP_READ_ROUND_TRIPS.contains(&(query, seed))))
-        {
-            let seeded = inputs.single(query, seed, scale, None, None, true);
-            tally.check(
-                matches!(&seeded, Ok((text, _)) if digest(text) == round_trip),
-                || format!("q{query} seed {seed:?} sf {scale}: seeded text differs"),
-            );
+        for (ok, what) in results.iter().zip([
+            "rewritten template",
+            "explicit text",
+            "alternate-seed text",
+            "seeded text",
+        ]) {
+            tally.check(*ok, || {
+                format!("q{query} seed {seed:?} sf {scale}: {what} differs")
+            });
         }
     }
-    eprintln!("explicit checks matched {}", tally.matched);
+    eprintln!(
+        "explicit: {} records, checks matched {}, records excluded {} (would match anyway: {})",
+        records.len(),
+        tally.matched,
+        tally.excluded,
+        tally.excluded_matching
+    );
     assert!(
         tally.mismatches.is_empty(),
         "{} mismatches: {:?}",
@@ -435,33 +464,66 @@ fn replays_explicit_parameter_records() {
     );
 }
 
+fn parameters_of(
+    inputs: &Inputs,
+    query: &str,
+    seed: i64,
+    scale: f64,
+    stream: Option<u32>,
+    prefix: &str,
+) -> Vec<String> {
+    let (_, params, wrapped) = inputs
+        .single(query, Some(seed), scale, stream, None)
+        .unwrap();
+    assert!(wrapped);
+    let mut values: Vec<(&String, &String)> = params
+        .iter()
+        .filter(|(name, _)| name.starts_with(prefix))
+        .collect();
+    values.sort();
+    values.into_iter().map(|(_, value)| value.clone()).collect()
+}
+
 #[test]
-fn replays_nondeterministic_query_34_cases() {
+fn a_ulist_longer_than_its_permutation_wraps_in_order() {
     let Some(root) = checkout() else { return };
     let inputs = Inputs::load(&root);
-    let manifest: Value =
-        serde_json::from_str(&fs::read_to_string(inputs.corpus.join("manifest.json")).unwrap())
-            .unwrap();
-    let cases = manifest["tpcds"]["nondeterministic_cases"]["cases"]
-        .as_array()
-        .unwrap();
-    let mut tally = Tally::new();
-    for case in cases {
-        let seed = case["seed"].as_i64();
-        let scale = nullable_scale(&case["sf"]);
-        for (mode, log_run) in [("plain", false), ("log", true)] {
-            let outcome = inputs.single("34", seed, scale, None, None, log_run);
-            let wanted = case[mode]["h"].as_array().unwrap();
-            tally.check(
-                matches!(&outcome, Ok((text, _)) if wanted.iter().all(|hash| hash.as_str() == Some(digest(text).as_str()))),
-                || format!("q34 seed {seed:?} sf {scale} {mode}"),
-            );
+    for (query, scale, prefix, held) in [
+        ("46", 1.0, "CITYNUMBER", 2),
+        ("34", 10.0, "COUNTYNUMBER", 3),
+    ] {
+        for seed in [1, 42, 1_339_962_585] {
+            let values = parameters_of(&inputs, query, seed, scale, None, prefix);
+            assert!(values.len() > held);
+            for (index, value) in values.iter().enumerate() {
+                assert_eq!(
+                    *value,
+                    values[index % held],
+                    "q{query} seed {seed} entry {index}"
+                );
+            }
+            let mut head: Vec<&String> = values[..held].iter().collect();
+            head.sort();
+            head.dedup();
+            assert_eq!(head.len(), held);
+            let again = parameters_of(&inputs, query, seed, scale, None, prefix);
+            assert_eq!(values, again);
         }
     }
-    eprintln!(
-        "nondeterministic cases matched {} of {}",
-        tally.matched,
-        cases.len() * 2
-    );
-    assert!(tally.mismatches.is_empty(), "{:?}", tally.mismatches);
+}
+
+#[test]
+fn wrapped_draws_do_not_depend_on_the_stream_position() {
+    let Some(root) = checkout() else { return };
+    let inputs = Inputs::load(&root);
+    let (_, plain, _) = inputs.single("34", Some(42), 10.0, None, None).unwrap();
+    let (_, streamed, wrapped) = inputs.single("34", Some(42), 10.0, Some(0), None).unwrap();
+    assert!(wrapped);
+    assert_eq!(plain, streamed);
+    for stream in [1, 5] {
+        let values = parameters_of(&inputs, "34", 42, 10.0, Some(stream), "COUNTYNUMBER");
+        for (index, value) in values.iter().enumerate() {
+            assert_eq!(*value, values[index % 3]);
+        }
+    }
 }

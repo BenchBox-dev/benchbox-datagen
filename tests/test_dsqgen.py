@@ -67,7 +67,6 @@ def test_single_template_records_replay(inputs):
             record["sf"],
             seed=record["seed"],
             dialect_text=inputs["dialect"],
-            log_run=True,
         )
         assert digest(text) == record["h"], record["q"]
         assert params == record["p"]
@@ -97,7 +96,7 @@ def test_streams_follow_the_template_permutation(inputs):
     names = [line for line in (inputs["templates"] / "templates.lst").read_text().splitlines() if line]
     templates = [(name, (inputs["templates"] / name).read_text()) for name in names]
     log, streams = benchbox_datagen.generate_tpcds_streams(
-        templates, inputs["dialect"], inputs["idx"], 1.0, seed=42, streams=2, log_run=True
+        templates, inputs["dialect"], inputs["idx"], 1.0, seed=42, streams=2
     )
     assert [stream for stream, _ in streams] == [0, 1]
     assert all(len(queries) == 99 for _, queries in streams)

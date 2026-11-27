@@ -14,7 +14,8 @@ const DIST_SALES: i64 = 3;
 const DIST_RETURNS: i64 = 5;
 const MAX_ARGS: usize = 20;
 const CALENDAR: &str = "calendar";
-const CHUNK_MINIMUM: u64 = 32;
+
+type Generated = (String, Vec<(String, String)>, bool);
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Val {
@@ -54,7 +55,7 @@ pub(crate) struct Run<'a, 'b> {
     pub(crate) stream_number: i64,
     current: usize,
     template_name: String,
-    log_run: bool,
+    wrapped: bool,
 }
 
 fn evaluation(message: impl Into<String>) -> DsqgenError {
@@ -89,7 +90,7 @@ fn integer_uniform(rng: &mut Rng, min: i64, max: i64) -> Result<i64, DsqgenError
 }
 
 impl<'a, 'b> Run<'a, 'b> {
-    pub(crate) fn new(dists: &'a DistIndex<'b>, arena: Arena, seed: u64, log_run: bool) -> Self {
+    pub(crate) fn new(dists: &'a DistIndex<'b>, arena: Arena, seed: u64) -> Self {
         Self {
             arena,
             templates: Vec::new(),
@@ -103,7 +104,7 @@ impl<'a, 'b> Run<'a, 'b> {
             stream_number: 0,
             current: 0,
             template_name: String::new(),
-            log_run,
+            wrapped: false,
         }
     }
 
@@ -129,8 +130,9 @@ impl<'a, 'b> Run<'a, 'b> {
         &mut self,
         template: usize,
         log: &mut Option<String>,
-    ) -> Result<(String, Vec<(String, String)>), DsqgenError> {
+    ) -> Result<Generated, DsqgenError> {
         self.current = template;
+        self.wrapped = false;
         self.template_name = self.templates[template].name.clone();
         if let Some(log) = log {
             log.push_str(&format!("Template: {}\n", self.template_name));
@@ -195,7 +197,7 @@ impl<'a, 'b> Run<'a, 'b> {
             }
         }
         self.query_count += 1;
-        Ok((text, parameters))
+        Ok((text, parameters, self.wrapped))
     }
 
     fn evaluate_sub(&mut self, id: usize, query: i64) -> Result<(), DsqgenError> {
@@ -508,17 +510,13 @@ impl<'a, 'b> Run<'a, 'b> {
                     return Err(evaluation("a permutation slot was reused"));
                 };
                 keys.shuffle(&mut self.rng);
-                for index in 0..params[3].n.max(0) as u64 {
-                    let entry = match keys.entry(index) {
-                        Some(entry) => entry,
-                        None => heap_word(
-                            &self.template_name,
-                            self.log_run,
-                            keys.size(),
-                            index,
-                            keys.shuffles(),
-                        ),
-                    } + 1;
+                let count = params[3].n.max(0) as u64;
+                let held = keys.size();
+                if count > held {
+                    self.wrapped = true;
+                }
+                for index in 0..count {
+                    let entry = keys.entry(index % held).unwrap_or(0) + 1;
                     let target = out
                         .get_mut(index as usize)
                         .ok_or_else(|| evaluation("a list is larger than its substitution"))?;
@@ -677,32 +675,6 @@ impl<'a, 'b> Run<'a, 'b> {
             count += 1;
         }
         Ok(())
-    }
-}
-
-fn heap_word(template_name: &str, log_run: bool, size: u64, index: u64, shuffles: u64) -> u64 {
-    let chunk = ((8 * size + 8 + 15) & !15).max(CHUNK_MINIMUM);
-    let usable_words = (chunk - 8) / 8;
-    if index < usable_words {
-        return 0;
-    }
-    if shuffles > 1 {
-        return match index - usable_words {
-            0 | 4 => 0x21,
-            1 => 1 | (10 << 32),
-            2 => 10 << 32,
-            _ => 0,
-        };
-    }
-    if index != usable_words {
-        return 0;
-    }
-    let stem = template_name.rsplit('/').next().unwrap_or_default();
-    let key = stem.trim_start_matches("query").trim_end_matches(".tpl");
-    match (key, log_run) {
-        ("34", false) => 0x31,
-        ("27" | "34" | "36" | "73", _) => 0x41,
-        _ => 0x21,
     }
 }
 

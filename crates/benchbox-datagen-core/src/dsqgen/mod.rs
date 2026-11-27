@@ -57,7 +57,6 @@ pub struct StreamsRequest<'a> {
     pub seed: Option<i64>,
     pub streams: u32,
     pub qualify: bool,
-    pub log_run: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +64,7 @@ pub struct GeneratedStatement {
     pub template: String,
     pub text: String,
     pub parameters: Vec<(String, String)>,
+    pub wrapped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,13 +91,13 @@ pub struct DsqgenQueryRequest<'a> {
     pub seed: Option<i64>,
     pub stream: Option<u32>,
     pub parameters: Option<&'a [(String, String)]>,
-    pub log_run: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DsqgenQuery {
     pub text: String,
     pub parameters: Vec<(String, String)>,
+    pub wrapped: bool,
 }
 
 fn validate_scale(scale_factor: f64) -> Result<(), DsqgenError> {
@@ -160,7 +160,7 @@ pub fn generate_streams(request: &StreamsRequest<'_>) -> Result<StreamsOutput, D
         }
         parsed.push(template);
     }
-    let mut run = Run::new(&dists, arena, seed as u64, request.log_run);
+    let mut run = Run::new(&dists, arena, seed as u64);
     for template in parsed {
         run.add_template(template);
     }
@@ -183,7 +183,7 @@ pub fn generate_streams(request: &StreamsRequest<'_>) -> Result<StreamsOutput, D
             } else {
                 order[position - 1] as usize
             };
-            let (text, parameters) = run.generate(id, &mut log)?;
+            let (text, parameters, wrapped) = run.generate(id, &mut log)?;
             if let Some(log) = &mut log {
                 log.push('\n');
             }
@@ -191,6 +191,7 @@ pub fn generate_streams(request: &StreamsRequest<'_>) -> Result<StreamsOutput, D
                 template: request.templates[id].name.to_owned(),
                 text,
                 parameters,
+                wrapped,
             });
         }
         if let Some(log) = &mut log {
@@ -362,7 +363,6 @@ pub fn generate_query(request: &DsqgenQueryRequest<'_>) -> Result<DsqgenQuery, D
         seed: request.seed,
         streams: request.stream.map_or(1, |stream| stream + 1),
         qualify: false,
-        log_run: request.log_run,
     })?;
     let last = output
         .streams
@@ -392,6 +392,11 @@ pub fn generate_query(request: &DsqgenQueryRequest<'_>) -> Result<DsqgenQuery, D
     Ok(DsqgenQuery {
         text,
         parameters: last.parameters.clone(),
+        wrapped: output
+            .streams
+            .iter()
+            .flat_map(|stream| &stream.queries)
+            .any(|query| query.wrapped),
     })
 }
 
@@ -463,7 +468,6 @@ mod tests {
             seed,
             streams: 1,
             qualify: false,
-            log_run: false,
         };
         assert_eq!(
             generate_streams(&request(0.0, None)),

@@ -66,7 +66,6 @@ def generate_query(
     *,
     dialect_text: str,
     parameters: Sequence[tuple[str, str]] | None = None,
-    log_run: bool = False,
 ) -> tuple[str, dict[str, str]]: ...
 def generate_tpcds_streams(
     templates: Sequence[tuple[str, str]],
@@ -76,5 +75,4 @@ def generate_tpcds_streams(
     seed: int | None = None,
     streams: int = 1,
     qualify: bool = False,
-    log_run: bool = False,
 ) -> tuple[str, list[tuple[int, list[tuple[str, str, list[tuple[str, str]]]]]]]: ...
