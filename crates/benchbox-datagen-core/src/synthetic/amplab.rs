@@ -10,7 +10,7 @@ use super::calendar::days_from_civil;
 use super::rng::{Draw, Stream};
 use super::{BLOCK_ROWS, Generator, Table, block_len};
 use crate::generate::KeyRange;
-use crate::schema::{self, Column, Date, Decimal128, Int, Text};
+use crate::schema::{self, Column, Date, DecimalTrimmed, Int, Text};
 
 const BENCHMARK: &str = "amplab";
 const RANKINGS_PER_SCALE: u64 = 250_000;
@@ -125,7 +125,7 @@ const COLUMNS: [(&str, &[Column]); 3] = [
             ("sourceIP", Text, true),
             ("destURL", Text, true),
             ("visitDate", Date, true),
-            ("adRevenue", Decimal128(8, 2), true),
+            ("adRevenue", DecimalTrimmed(8, 2), true),
             ("userAgent", Text, true),
             ("countryCode", Text, true),
             ("languageCode", Text, true),

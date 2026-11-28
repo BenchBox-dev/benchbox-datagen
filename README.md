@@ -264,8 +264,8 @@ and the tables have no foreign key. `pageRank` is `floor(10 * Pareto(1.16))` cap
 at 10,000, sampled by inversion against a table built with an owned `ln` and `exp`
 (only `+ - * /`, no libm). `adRevenue` is `0` (90%) or a uniform amount between 0.01 and
 5.00 rounded to cents (10%); `searchWord` is null for half the rows. `visitDate`
-is uniform over 2000-01-01 to 2000-03-31. Delimited output pads decimals
-(`0.00`, `2.50`) where legacy printed Python floats (`0.0`, `2.5`).
+is uniform over 2000-01-01 to 2000-03-31; delimited `adRevenue` is unpadded
+like legacy (`0.0`, `2.5`).
 
 `tools/synthetic_acceptance.py amplab ...` (config in
 `tools/synthetic_configs/amplab.py`) produces the legacy-versus-library

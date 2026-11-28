@@ -33,7 +33,7 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "tbl",
         "0.01",
         "uservisits",
-        "ecd0628ca8a6f742844d3042aaa33576d441ea27ebd16d23c9717daa065518b8",
+        "81cff07b2a926cd65feff773f2ed241b2971a53ea30a49cec7f6c5d595684607",
     ),
     (
         "tbl",
@@ -51,7 +51,7 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "tbl",
         "0.1",
         "uservisits",
-        "14fd481006e56ae9728a6d18055ad73c1e58105d873f5d3454ad2f5c71f3fb27",
+        "1decf70b642dc25dde01a0ca6710aafe1036cc6e6b1858bcb4ae53b3fceea3f9",
     ),
     (
         "parquet",
@@ -69,7 +69,7 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "parquet",
         "0.01",
         "uservisits",
-        "9e8abaa537beb6b71ed13c33f10f36631f7d4cbb68c58075697e1fed577f2527",
+        "ceacccd6c77b9f0336c30add79ccc73e0c7e11c84460a9a0b6b7a897aeb62f47",
     ),
     (
         "parquet",
@@ -87,7 +87,7 @@ const GOLDENS: &[(&str, &str, &str, &str)] = &[
         "parquet",
         "0.1",
         "uservisits",
-        "7ed8340f0a240822f101b1e10f2148ae33c68428bd0fe07d9045b26c37561b13",
+        "8a0423d032f6ae2f9bc77e56b64256ee617d1e20472f09882c2ef9f4726324fc",
     ),
 ];
 
