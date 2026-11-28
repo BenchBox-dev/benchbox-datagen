@@ -146,6 +146,21 @@ pub(crate) fn active_locations(scale_factor: f64) -> ActiveLocations {
     }
 }
 
+pub(crate) fn dsqgen_rowcount(name: &str, scale_factor: f64) -> Option<u64> {
+    let name = name.to_ascii_lowercase();
+    let locations = || active_locations(scale_factor);
+    match name.as_str() {
+        "date" => Some(id_count("date_dim", scale_factor)),
+        "time" => Some(id_count("time_dim", scale_factor)),
+        "active_cities" => Some(locations().cities),
+        "active_counties" => Some(locations().counties),
+        "active_states" => Some(locations().states),
+        other => TABLES
+            .contains(&other)
+            .then(|| id_count(other, scale_factor)),
+    }
+}
+
 pub(crate) fn history_ids(rows: u64) -> u64 {
     let unique = (rows / 6) * 3;
     match rows % 6 {

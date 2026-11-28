@@ -14,7 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  BENCHBOX_REF: 5cae9afda8939c965ba95de7865817e72875879e
+  BENCHBOX_REF: 2b12790f2c0411c6bab8a099ff6eedcd6cb05ab7
 
 jobs:
   rust:
@@ -33,6 +33,8 @@ jobs:
           sparse-checkout: |
             tests/fixtures/tpc_query_corpus
             benchbox/_binaries/tpc-h/templates
+            benchbox/_binaries/tpc-ds/templates
+            benchbox/_binaries/tpc-ds/linux-x86_64
           persist-credentials: false
       - name: Export BENCHBOX_CHECKOUT
         shell: bash
@@ -77,6 +79,8 @@ jobs:
           sparse-checkout: |
             tests/fixtures/tpc_query_corpus
             benchbox/_binaries/tpc-h/templates
+            benchbox/_binaries/tpc-ds/templates
+            benchbox/_binaries/tpc-ds/linux-x86_64
           persist-credentials: false
       - name: Export BENCHBOX_CHECKOUT
         shell: bash

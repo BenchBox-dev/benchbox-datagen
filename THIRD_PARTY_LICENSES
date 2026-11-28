@@ -4116,11 +4116,11 @@ No Warranty
     ADVANCE NOTICE OF THE POSSIBILITY OF SUCH DAMAGES.
 
 ================================================================================
-TPC-DERIVED FILES in benchbox-datagen (TPC-DS 4.0.0 kit)
+TPC-DERIVED FILES in benchbox-datagen (TPC-DS 4.0.0 and TPC-H kits)
 
-The following files are derived from the TPC-DS 4.0.0 kit (dsdgen, its distribution
-files and column list), a Work covered by the TPC legal notice above. The notice
-applies to them:
+The following files are derived from the TPC-DS 4.0.0 kit (dsdgen, dsqgen, their
+distribution files and column list) and the TPC-H kit (qgen), Works covered by the
+TPC legal notice above. The notice applies to them:
 
 - crates/benchbox-datagen-core/src/tpcds_update/columns.rs: generated from tools/column_list.txt of the TPC-DS 4.0.0 kit (the column list mkheader turns into dsdgen's columns.h)
 - crates/benchbox-datagen-core/src/tpcds_update/dims.rs: the scaling.dst row-count weights (row_spec, source_table_rows), the zip-to-GMT offset table (GMT_OFFSETS) and dimension source-table generators ported from dsdgen
@@ -4132,3 +4132,11 @@ applies to them:
 - crates/benchbox-datagen-core/src/tpcds_update/rng.rs: random-stream seeding by column number ported from dsdgen
 - crates/benchbox-datagen-core/src/tpcds_update/out.rs: field formatting of dsdgen's row printers
 - crates/benchbox-datagen-core/src/tpcds_update/mod.rs: refresh-set file layout and delete files ported from dsdgen
+- crates/benchbox-datagen-core/src/dsqgen/lexer.rs: the dsqgen keyword table (keywords.c KeyWords[]) and the template tokenizer, ported from the TPC-DS 4.0.0 kit
+- crates/benchbox-datagen-core/src/dsqgen/parser.rs: the query template grammar (qgen.y), ported from the TPC-DS 4.0.0 kit
+- crates/benchbox-datagen-core/src/dsqgen/eval.rs: template expression evaluation (EvalRandomExpr and its helpers in eval.c), ported from the TPC-DS 4.0.0 kit
+- crates/benchbox-datagen-core/src/dsqgen/rng.rs: the random-number stream, genrand_key, genrand_integer and makeKeyPermutation (genrand.c, permute.c), ported from the TPC-DS 4.0.0 kit
+- crates/benchbox-datagen-core/src/dsqgen/idx.rs: the reader for the tpcds.idx distribution index format (dist.c), ported from the TPC-DS 4.0.0 kit
+- crates/benchbox-datagen-core/src/dsqgen/date.rs: date parsing, Julian-day and calendar routines (date.c), ported from the TPC-DS 4.0.0 kit
+- crates/benchbox-datagen-core/src/dsqgen/mod.rs: dsqgen stream generation, template ordering and seeding (qgen_main.c), ported from the TPC-DS 4.0.0 kit
+- crates/benchbox-datagen-core/src/qgen.rs: qgen query parameter generation and the TPC-H query defaults, ported from the TPC-H kit
