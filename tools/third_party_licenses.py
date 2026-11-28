@@ -48,15 +48,52 @@ TPC_DERIVED = [
         "crates/benchbox-datagen-core/src/tpcds_update/mod.rs",
         "refresh-set file layout and delete files ported from dsdgen",
     ),
+    (
+        "crates/benchbox-datagen-core/src/dsqgen/lexer.rs",
+        "the dsqgen keyword table (keywords.c KeyWords[]) and the template tokenizer, ported from the TPC-DS 4.0.0 kit",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/dsqgen/parser.rs",
+        "the query template grammar (qgen.y), ported from the TPC-DS 4.0.0 kit",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/dsqgen/eval.rs",
+        "template expression evaluation (EvalRandomExpr and its helpers in eval.c), ported from the TPC-DS 4.0.0 kit",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/dsqgen/rng.rs",
+        "the random-number stream, genrand_key, genrand_integer and makeKeyPermutation (genrand.c, permute.c), ported from the TPC-DS 4.0.0 kit",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/dsqgen/idx.rs",
+        "the reader for the tpcds.idx distribution index format (dist.c), ported from the TPC-DS 4.0.0 kit",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/dsqgen/date.rs",
+        "date parsing, Julian-day and calendar routines (date.c), ported from the TPC-DS 4.0.0 kit",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/dsqgen/mod.rs",
+        "dsqgen stream generation, template ordering and seeding (qgen_main.c), ported from the TPC-DS 4.0.0 kit",
+    ),
+    (
+        "crates/benchbox-datagen-core/src/qgen.rs",
+        "qgen query parameter generation and the TPC-H query defaults, ported from the TPC-H kit",
+    ),
 ]
 
 
 def tpc_derived_notice() -> str:
-    directory = ROOT / "crates" / "benchbox-datagen-core" / "src" / "tpcds_update"
+    source = ROOT / "crates" / "benchbox-datagen-core" / "src"
     listed = {ROOT / path for path, _ in TPC_DERIVED}
-    unlisted = sorted(str(path.relative_to(ROOT)) for path in directory.glob("*.rs") if path not in listed)
+    unlisted = sorted(
+        str(path.relative_to(ROOT))
+        for directory in (source / "tpcds_update", source / "dsqgen")
+        for path in directory.glob("*.rs")
+        if path not in listed
+    )
     if unlisted:
-        raise SystemExit(f"tpcds_update files missing from TPC_DERIVED in tools/third_party_licenses.py: {unlisted}")
+        raise SystemExit(f"TPC-derived files missing from TPC_DERIVED in tools/third_party_licenses.py: {unlisted}")
     readme = (ROOT / "README.md").read_text()
     for path, _ in TPC_DERIVED:
         if not (ROOT / path).is_file():
@@ -66,10 +103,10 @@ def tpc_derived_notice() -> str:
     entries = "\n".join(f"- {path}: {what}" for path, what in TPC_DERIVED)
     return (
         "================================================================================\n"
-        "TPC-DERIVED FILES in benchbox-datagen (TPC-DS 4.0.0 kit)\n\n"
-        "The following files are derived from the TPC-DS 4.0.0 kit (dsdgen, its distribution\n"
-        "files and column list), a Work covered by the TPC legal notice above. The notice\n"
-        "applies to them:\n\n"
+        "TPC-DERIVED FILES in benchbox-datagen (TPC-DS 4.0.0 and TPC-H kits)\n\n"
+        "The following files are derived from the TPC-DS 4.0.0 kit (dsdgen, dsqgen, their\n"
+        "distribution files and column list) and the TPC-H kit (qgen), Works covered by the\n"
+        "TPC legal notice above. The notice applies to them:\n\n"
         f"{entries}\n"
     )
 

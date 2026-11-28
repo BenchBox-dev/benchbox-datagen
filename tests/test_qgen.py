@@ -140,7 +140,7 @@ def test_seeds_outside_the_generator_range_are_refused(seed):
 
 def test_other_benchmarks_are_rejected():
     with pytest.raises(ValueError, match="not available"):
-        benchbox_datagen.generate_query("tpcds", "1", "", "", 1.0, seed=1)
+        benchbox_datagen.generate_query("ssb", "1", "", "", 1.0, seed=1)
 
 
 def test_malformed_distributions_are_value_errors():
