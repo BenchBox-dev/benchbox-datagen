@@ -1,0 +1,22 @@
+{
+ "documents": [
+  ["url", "string", true],
+  ["contents", "string", true]
+ ],
+ "rankings": [
+  ["pageURL", "string", true],
+  ["pageRank", "int64", true],
+  ["avgDuration", "int64", true]
+ ],
+ "uservisits": [
+  ["sourceIP", "string", true],
+  ["destURL", "string", true],
+  ["visitDate", "date32[day]", true],
+  ["adRevenue", "decimal128(8, 2)", true],
+  ["userAgent", "string", true],
+  ["countryCode", "string", true],
+  ["languageCode", "string", true],
+  ["searchWord", "string", true],
+  ["duration", "int64", true]
+ ]
+}
