@@ -74,10 +74,5 @@ CONFIG = SyntheticConfig(
     queries=queries,
     legacy_generate=legacy_generate,
     benchbox_schema=benchbox_schema,
-    budgets={
-        (1.0, "tbl"): (15.0, 512),
-        (1.0, "parquet"): (15.0, 512),
-        (10.0, "tbl"): (150.0, 1024),
-        (10.0, "parquet"): (150.0, 1024),
-    },
+    budget_class="tpch",
 )

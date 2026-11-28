@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 Column = tuple[str, str]
 SEEDS = list(range(42, 47))
 EXTENDED_SEEDS = list(range(42, 72))
+BUDGET_CLASSES = ("tpch", "tpcds")
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,7 @@ class SyntheticConfig:
     queries: Path | Callable[[], dict[str, str]]
     legacy_generate: Callable[[float, int, Path], None]
     benchbox_schema: Callable[[], dict]
-    budgets: dict[tuple[float, str], tuple[float, int]]
+    budgets: dict[tuple[float, str], tuple[float, int]] = field(default_factory=dict)
     exclusions: dict[Column, str] = field(default_factory=dict)
     table_exclusions: dict[str, str] = field(default_factory=dict)
     conditional_exclusions: Callable[[dict, dict], dict[Column, str]] | None = None
@@ -36,6 +37,9 @@ class SyntheticConfig:
     legacy_suffix: str = "tbl"
     legacy_delimiter: str = "|"
     legacy_header: bool = False
+    legacy_nullstr: str | None = None
+    stats_memory_limit: str = "2GB"
+    budget_class: str | None = None
     schema_path: Path | None = None
     distribution_scales: tuple[float, ...] = (0.1, 1.0)
     query_scales: tuple[float, ...] = (0.01, 0.1, 1.0)
@@ -49,6 +53,10 @@ class SyntheticConfig:
             raise ValueError(f"{self.name}: primary_keys must cover exactly the tables")
         if not self.legacy_delimiter or len(self.legacy_delimiter) != 1:
             raise ValueError(f"{self.name}: legacy_delimiter must be one character")
+        if self.budget_class and self.budgets:
+            raise ValueError(f"{self.name}: give budgets or budget_class, not both")
+        if self.budget_class not in (None, *BUDGET_CLASSES):
+            raise ValueError(f"{self.name}: budget_class must be one of {BUDGET_CLASSES}")
         if not self.legacy_suffix.strip():
             raise ValueError(f"{self.name}: legacy_suffix must name the legacy file extension")
 

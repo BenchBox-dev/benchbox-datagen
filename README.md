@@ -147,6 +147,7 @@ the output and is a generator version bump that refreezes the golden hashes.
   | `timestamp[us]` | `YYYY-MM-DD HH:MM:SS`, plus `.ffffff` only when the microseconds are not zero (Python `str(datetime)`) | `strftime("%Y-%m-%d %H:%M:%S")` in `h2odb`, `tsbs_devops`, `clickbench` |
   | `float`, `double` | shortest round-trip digits in Python `repr` layout (`0.1`, `1.0`, `1e-05`, `1e+16`, `nan`, `inf`) | `h2odb` and `amplab` write Python floats through `csv`/`str` |
   | fixed-scale `double` (`Kind::Fixed(n)`; the scale travels as the field metadata `benchbox.fixed_scale`, so a table cannot forget it) | `n` decimals (`1.50`), ties to even (`0.125` is `0.12`) | `tsbs_devops` metrics and `coffeeshop` prices use `f"{x:.2f}"` |
+  | trimmed `decimal128(p, s)` (`Kind::DecimalTrimmed(p, s)`; field metadata `benchbox.trimmed_decimal`) | Python `repr(float(x))`: trailing zeros dropped, at least one decimal (`2.5`, `1.0`, `-0.05`), exponent form below `1e-4` (`1e-05`) and from `1e16` | legacy `h2odb` lon/lat and `amplab` `adRevenue` decimals written as Python floats |
   | `decimal128(p, s)` | exactly `s` decimals, `-0.05`, no exponent | TPC-H style `dbgen` decimals; `h2odb`, `coffeeshop`, `amplab` declare `DECIMAL` columns |
   | `bool` | `true` / `false` | no legacy generator among the eight writes one; the form every target engine accepts |
   | `fixed_size_list<float>[n]` | `[v1,v2,...]`, each element `%.6g` | `vector_search._array_to_csv` (`f"{v:.6g}"` joined by `,`) |
@@ -306,6 +307,24 @@ one Python config file and one schema file; nothing else is edited.
    legacy files are not `|`-separated `.tbl` overrides `text_format` (see Text
    output above).
 
+   **Block size.** Rows are generated in blocks of `Table::block_rows()` rows
+   (default `synthetic::BLOCK_ROWS` = 65,536). A block is generated whole, and
+   the pipeline holds up to about `2 x threads` blocks in flight, so peak memory
+   is roughly that many blocks. Leave the default for narrow rows. For wide rows
+   (amplab documents about 2.5 KB per row, vector_search 128 floats per row)
+   override `fn block_rows(&self) -> u64` on the `Table` so one block is about
+   16 MiB of Arrow data: `16 MiB / bytes per row`, for example 6,500 rows at
+   2.5 KB or 32,768 rows at 512 B. Inside `block(index)` use
+   `block_len_in(self.rows(), index, self.block_rows())` for the row count and
+   `index * self.block_rows()` for the first row; `block_len` and `BLOCK_ROWS`
+   are the default-size forms. Part slicing, the header (first part only),
+   `warm` and the single-file chunking all follow the declared size. Parquet row
+   groups stay at 122,880 rows whatever the block size, so a Parquet writer
+   still buffers one row group of wide rows. The block size is part of the
+   output only through what `block(index)` derives from the index (for example
+   per-block random streams), so changing it on an existing table changes its
+   data unless the table derives values from the row number.
+
    **Row counts and key ranges are closed-form functions of the scale
    factor, not of the seed**: `row_count`, `key_ranges` and `table_scales` take
    no seed, and a part is a row range of a fixed-size table. A table whose
@@ -332,16 +351,35 @@ one Python config file and one schema file; nothing else is edited.
    `tools/bench_budgets.py`, and the exclusions. Config files are discovered by
    file name, so no list needs editing. Every exclusion (column, whole table or
    data-dependent) needs a written reason; a blank reason raises.
+   `budget_class` (`"tpch"` or `"tpcds"`, default none) judges the benchmark
+   against that class's wall-time and RSS budgets from the ADR table instead of
+   its own `budgets` (give one or the other; `budgets` is optional with a class): `tpch_skew` is TPC-H data with skew, so it uses the TPC-H
+   budgets; every other synthetic generator keeps the synthetic budget.
+   `stats_memory_limit` (default `"2GB"`) is the DuckDB memory limit of the
+   legacy statistics run; statistics are computed in batches of 4 columns, so
+   raise it only for very large tables.
 5. **Evidence.** Run, for each scale in the config, `tools/synthetic_acceptance.py
    <name> legacy`, `library` (the same seeds), `compare` (add `*_queries`
    files for seeds 47-71 when legacy leaves a query empty) and `verify`, then
    `report`, and put the report in the PR. Required results, unchanged from
    SSB: every metric inside the legacy min-max or the 99.9% prediction
-   interval of 5 legacy seeds (boundary quantiles of low-cardinality columns
-   may pass by rank); queries never empty in legacy never empty in the
+   interval of 5 legacy seeds, or, when it fails that on any library seed, not
+   significantly different (two-sided Mann-Whitney U, normal approximation with
+   tie correction, p >= 0.001) between the 30 legacy and 30 library values of
+   seeds 42-71 (run `legacy` and `library` for seeds 42-71 and pass them as
+   `compare --legacy-extended` and `--library-extended`; a missing seed stops
+   with an error, and the report lists every re-judged metric with both
+   30-value summaries and the p-value) (boundary quantiles of low-cardinality columns
+   may pass by rank; a statistic that is identical in all 5 legacy seeds must
+   be identical in the library when it is integer-valued, and equal within a
+   relative 1e-9 otherwise, as is every constant mean, because summation order
+   alone moves a float mean by about 1e-12 and that is numeric noise, not a
+   distribution difference); queries never empty in legacy never empty in the
    library, otherwise 30 seeds per side with one-sided Fisher p >= 0.001; no
-   orphan or duplicate keys; every query returns the same rows in DuckDB and
-   DataFusion; wall-time and peak-RSS budgets met. Also run
+   orphan or duplicate keys (a NULL foreign key is not an orphan, so a
+   nullable foreign key can be declared); every query returns the same row
+   count in DuckDB and DataFusion (value differences are reported as warnings,
+   and NaN on both engines agrees); wall-time and peak-RSS budgets met. Also run
    `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
    `pytest tests` and `python3 tools/third_party_licenses.py --check`.
 6. **Docs.** Add a section for the benchmark to this README next to SSB
@@ -370,6 +408,50 @@ maturin develop --release && pytest tests
 output by SHA-256, and `tools/bench_budgets.py` measures the wall-time and
 peak-RSS budgets from the design ADR (`--driver` measures a compiled driver
 binary instead of the Python module).
+
+## TPC-DS query generation
+
+`generate_query("tpcds", ...)` and `generate_tpcds_streams(...)` are a Rust port of `dsqgen`. They interpret
+the template language over BenchBox-supplied inputs only: the `.tpl` templates, the dialect template
+(`netezza.tpl` is the only one BenchBox reaches) and the `tpcds.idx` distribution index, all passed at call
+time. The port is TPC-derived code (`dsqgen/*.rs` follow the TPC-DS kit's `keywords.c`, `scaling.c`, `eval.c`, `genrand.c`, `permute.c` and `dsqgen` sources line by line), and it ships under the TPC legal notice in `THIRD_PARTY_LICENSES`; the files are listed in the table of generated and TPC-derived files under TPC-DS refresh sets. No TPC distribution file, template or query text is committed here. `rowcount()` comes
+from the library scale model (sub-scale rules and `active_locations` included). `parameters=` renders explicit
+values the way `DSQGenBinary.generate_with_parameters` does (it rewrites `[NAME.n]` tokens, then runs a seeded
+dsqgen). The sub-SF1 `query93.tpl` override stays with the caller, as in BenchBox.
+
+`tests/dsqgen_corpus.rs` replays the TPC-DS shards of the BenchBox query corpus (`tpcds_single`,
+`tpcds_stream_template`, `tpcds_stream_all` and `tpcds_explicit`) against
+the pinned `BENCHBOX_REF` checkout. `range()` and `list`/`ulist` on `text()` and `date()` are rejected with an error:
+no BenchBox template uses them.
+
+## Differences from C dsqgen
+
+**ULIST longer than its key permutation.** `ulist(random(min, max, uniform), n)` evaluates through `EvalRandomExpr`
+(`eval.c`), which shuffles a key permutation built by `makeKeyPermutation` (`permute.c`) holding `max - min + 1` keys and then
+reads `n` entries with `getPermutationEntry`. When `rowcount()` makes the permutation smaller than `n`, the C tool reads past
+the `malloc`ed array, so its output depends on glibc heap contents (the Q34 `-LOG` versus plain difference in the BenchBox
+corpus). The library defines this case: entry `i` is entry `i % size`, so the shortest permutation repeats in order. The result is
+deterministic on every platform and scale, identical across streams and runs for the same seed, and equal to C when the
+permutation holds one key (the value is always the minimum).
+
+A cell is affected wherever the available key count `n` is at least 2 and below the list length `k`. With `n` of 1 the value is always the minimum, so the wrap changes nothing and `wrapped` stays false. `n` follows `rowcount(...)` in the template, so it depends on the scale factor.
+
+Examples, generated over the `dsdgen` scale grid (1, 10, 100, 300, 1000, 3000, 10000, 30000 and 100000), with `n` in brackets:
+
+| Query | k | Scale factors (n) |
+| :--- | ---: | :--- |
+| 16 | 5 | 10 (3) |
+| 27, 27a | 6 | 10 (3) |
+| 34, 73 | 8 | 10 (3) |
+| 36 | 8 | 10 (3) |
+| 46 | 5 | 1 (2) |
+
+No other query is affected on the grid. Scale factors off the grid vary: the API accepts any whole scale factor up to 100000, and for example Q16 at SF 6-9 (2), 50 (3), 200 (4), Q27, Q27a and Q36 at SF 6-9 (2), 2000 (5), 20000 (5), Q46 at SF 4 (3) and 7 (4) are affected too, so do not read the table as a list of every affected scale factor. `GeneratedStatement::wrapped` and `DsqgenQuery::wrapped` (the third element of `generate_query("tpcds", ...)`, the fourth of each `generate_tpcds_streams` query) say whether a draw wrapped.
+
+The corpus replay takes the flag from the template and the scale model, not from a list. It excludes exactly the flagged cells; every other record matches. In `tpcds_explicit` only the seeded round-trip check is skipped for a flagged record, and the rewritten-template, explicit-text and alternate-seed checks still run. The C tool's values for flagged cells are not reproduced.
+
+**qgen (TPC-H).** `qgen` seed 0 for Q7 and Q12 raises an error (the distinct-value draw never terminates in C), and a missing seed
+requires `default_params=True` because `qgen`'s time-based seeding is not reproducible. BenchBox fails fast for seed 0 (PR #4558).
 
 ## TPC-DS refresh sets
 
@@ -427,6 +509,14 @@ this table):
 | `crates/benchbox-datagen-core/src/tpcds_update/rng.rs` | Random-stream seeding by column number ported from `dsdgen` |
 | `crates/benchbox-datagen-core/src/tpcds_update/out.rs` | Field formatting of `dsdgen`'s row printers |
 | `crates/benchbox-datagen-core/src/tpcds_update/mod.rs` | Refresh-set file layout and delete files ported from `dsdgen` |
+| `crates/benchbox-datagen-core/src/dsqgen/lexer.rs` | The `dsqgen` keyword table (`keywords.c` `KeyWords[]`, all 37 entries in order) and the template tokenizer, ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/parser.rs` | The query template grammar (`qgen.y`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/eval.rs` | Template expression evaluation (`EvalRandomExpr` and its helpers in `eval.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/rng.rs` | The random-number stream, `genrand_key`, `genrand_integer` and `makeKeyPermutation` (`genrand.c`, `permute.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/idx.rs` | The reader for the `tpcds.idx` distribution index format (`dist.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/date.rs` | Date parsing, Julian-day and calendar routines (`date.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/dsqgen/mod.rs` | `dsqgen` stream generation, template ordering and seeding (`qgen_main.c`), ported from the TPC-DS 4.0.0 kit |
+| `crates/benchbox-datagen-core/src/qgen.rs` | `qgen` query parameter generation and the TPC-H query defaults, ported from the TPC-H kit |
 | `tests/data/tpcds_refresh_sha256.json` | SHA-256 of the files written by the bundled `dsdgen -update` at scale factors 0.0001, 0.01 (sets 1 and 127), 1 (sets 1 to 7, plus `-rngseed 20260709`), 10 and 100 |
 | `tests/data/tpch_refresh_sf0.01_sha256.json` | SHA-256 of the files written by the bundled `dbgen -U` |
 
@@ -445,4 +535,4 @@ about 200 changed lines, is pinned by commit SHA and is never merged into a dive
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The files derived from the TPC kits (`tpcds_update/*.rs`, `dsqgen/*.rs` and `qgen.rs`) ship under the TPC legal notice in `THIRD_PARTY_LICENSES`.

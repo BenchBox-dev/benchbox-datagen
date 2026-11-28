@@ -9,7 +9,7 @@ use arrow::datatypes::{DataType, Field, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
 use super::calendar::civil_from_days;
-use crate::schema::FIXED_SCALE_KEY;
+use crate::schema::{FIXED_SCALE_KEY, TRIMMED_DECIMAL_KEY};
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -55,6 +55,7 @@ enum Column<'a> {
     Bool(&'a BooleanArray),
     Timestamp(&'a TimestampMicrosecondArray),
     Decimal(&'a Decimal128Array, usize),
+    TrimmedDecimal(&'a Decimal128Array, usize),
     Vector(&'a FixedSizeListArray, &'a Float32Array, usize),
 }
 
@@ -79,6 +80,10 @@ fn column<'a>(field: &Field, array: &'a dyn Array) -> io::Result<Column<'a>> {
     if fixed.is_some() && *data_type != DataType::Float64 {
         return Err(unsupported(name, data_type));
     }
+    let trimmed = field.metadata().contains_key(TRIMMED_DECIMAL_KEY);
+    if trimmed && !matches!(data_type, DataType::Decimal128(_, scale) if *scale >= 0) {
+        return Err(unsupported(name, data_type));
+    }
     let any = array.as_any();
     let column = match data_type {
         DataType::Int32 => any.downcast_ref().map(Column::Int32),
@@ -93,9 +98,13 @@ fn column<'a>(field: &Field, array: &'a dyn Array) -> io::Result<Column<'a>> {
         DataType::Timestamp(TimeUnit::Microsecond, None) => {
             any.downcast_ref().map(Column::Timestamp)
         }
-        DataType::Decimal128(_, scale) if *scale >= 0 => any
-            .downcast_ref()
-            .map(|array| Column::Decimal(array, *scale as usize)),
+        DataType::Decimal128(_, scale) if *scale >= 0 => any.downcast_ref().map(|array| {
+            if trimmed {
+                Column::TrimmedDecimal(array, *scale as usize)
+            } else {
+                Column::Decimal(array, *scale as usize)
+            }
+        }),
         DataType::FixedSizeList(item, length)
             if *item.data_type() == DataType::Float32 && *length > 0 =>
         {
@@ -186,6 +195,22 @@ fn push_decimal(out: &mut Vec<u8>, value: i128, scale: usize) {
     }
 }
 
+fn push_trimmed_decimal(out: &mut Vec<u8>, scratch: &mut Scratch, value: i128, scale: usize) {
+    let mut itoa = itoa::Buffer::new();
+    let digits = itoa.format(value.unsigned_abs()).as_bytes();
+    let exponent = if value == 0 {
+        0
+    } else {
+        digits.len() as i32 - 1 - scale as i32
+    };
+    scratch.digits.clear();
+    scratch.digits.extend_from_slice(digits);
+    while scratch.digits.len() > 1 && scratch.digits.last() == Some(&b'0') {
+        scratch.digits.pop();
+    }
+    push_digits(out, value < 0, &scratch.digits, exponent);
+}
+
 fn push_non_finite(out: &mut Vec<u8>, value: f64) -> bool {
     if value.is_nan() {
         out.extend_from_slice(b"nan");
@@ -229,7 +254,10 @@ fn push_repr(out: &mut Vec<u8>, scratch: &mut Scratch, shortest: std::fmt::Argum
         .write_fmt(shortest)
         .expect("writing to a String cannot fail");
     let (negative, exponent) = split_scientific(&scratch.text, &mut scratch.digits);
-    let digits = &scratch.digits;
+    push_digits(out, negative, &scratch.digits, exponent);
+}
+
+fn push_digits(out: &mut Vec<u8>, negative: bool, digits: &[u8], exponent: i32) {
     if negative {
         out.push(b'-');
     }
@@ -402,7 +430,9 @@ fn upper_bound(columns: &[Column<'_>], rows: usize, format: &TextFormat) -> usiz
             Column::Fixed(_, scale) => rows * (24 + scale),
             Column::Bool(_) => rows * 5,
             Column::Timestamp(_) => rows * 27,
-            Column::Decimal(array, _) => rows * (array.precision() as usize + 3),
+            Column::Decimal(array, _) | Column::TrimmedDecimal(array, _) => {
+                rows * (array.precision() as usize + 6)
+            }
             Column::Vector(_, _, length) => rows * (length * 14 + 4),
         })
         .sum();
@@ -467,6 +497,9 @@ pub(crate) fn encode(
                 }
                 Column::Decimal(array, scale) if array.is_valid(row) => {
                     push_decimal(out, array.value(row), *scale);
+                }
+                Column::TrimmedDecimal(array, scale) if array.is_valid(row) => {
+                    push_trimmed_decimal(out, &mut scratch, array.value(row), *scale);
                 }
                 Column::Vector(list, values, length) if list.is_valid(row) => {
                     let quoted = format.quote && format.delimiter == b',' && *length > 1;
@@ -725,6 +758,56 @@ mod tests {
             .with_precision_and_scale(18, 14)
             .unwrap();
         assert_eq!(lines(Arc::new(wide)), ["-0.73980000000000"]);
+    }
+
+    #[test]
+    fn trimmed_decimals_match_python_float_repr() {
+        let cases: [(i128, i8, &str); 17] = [
+            (-12_345_678_901_234_567, 16, "-1.2345678901234567"),
+            (9_007_199_254_740_993, 0, "9007199254740993.0"),
+            (-92_233_720_368_547_758, 17, "-0.92233720368547758"),
+            (0, 2, "0.0"),
+            (250, 2, "2.5"),
+            (-5, 2, "-0.05"),
+            (100, 2, "1.0"),
+            (-73_912_345_000_000, 14, "-0.73912345"),
+            (-7_391_234_512_345_678, 14, "-73.91234512345678"),
+            (1, 5, "1e-05"),
+            (-1, 5, "-1e-05"),
+            (10, 5, "0.0001"),
+            (1, 4, "0.0001"),
+            (12_345_678_901_234_500, 2, "123456789012345.0"),
+            (1_000_000_000_000_000_000, 2, "1e+16"),
+            (42, 0, "42.0"),
+            (123_456, 2, "1234.56"),
+        ];
+        let field = Kind::DecimalTrimmed(38, 0).field("c", true);
+        assert_eq!(field.metadata().get(TRIMMED_DECIMAL_KEY).unwrap(), "true");
+        for (value, scale, expected) in cases {
+            let array = Decimal128Array::from(vec![Some(value), None])
+                .with_precision_and_scale(38, scale)
+                .unwrap();
+            let field = Kind::DecimalTrimmed(38, scale).field("c", true);
+            let batch =
+                RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![Arc::new(array)])
+                    .unwrap();
+            let mut out = Vec::new();
+            encode(&batch, &TextFormat::tbl(), &mut out).unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), format!("{expected}\n\n"));
+        }
+    }
+
+    #[test]
+    fn trimmed_decimal_on_a_non_decimal_column_is_an_error() {
+        let field = Field::new("c", DataType::Int64, false).with_metadata(
+            std::collections::HashMap::from([(TRIMMED_DECIMAL_KEY.to_owned(), "true".to_owned())]),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![field])),
+            vec![Arc::new(arrow::array::Int64Array::from(vec![1]))],
+        )
+        .unwrap();
+        assert!(encode(&batch, &TextFormat::tbl(), &mut Vec::new()).is_err());
     }
 
     #[test]

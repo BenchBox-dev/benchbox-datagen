@@ -1,3 +1,4 @@
+mod dsqgen;
 mod generate;
 mod output;
 mod pipeline;
@@ -21,6 +22,11 @@ use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
 pub use benchbox_datagen_writers::Compression;
+pub use dsqgen::{
+    DsqgenError, DsqgenQuery, DsqgenQueryRequest, GeneratedStatement, StreamOutput, StreamsOutput,
+    StreamsRequest, TemplateSource, generate_query as generate_tpcds_query, generate_streams,
+    split_statements, substitute_parameters,
+};
 pub use generate::{KeyRange, TableScale};
 pub use output::{FileStats, Format, OutputRequest, write_benchmark, write_benchmark_cancellable};
 pub use qgen::{GeneratedQuery, QgenError, QueryRequest, generate_query};

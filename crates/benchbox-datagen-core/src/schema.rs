@@ -10,6 +10,7 @@ pub(crate) enum Kind {
     Int32,
     Decimal,
     Decimal128(u8, i8),
+    DecimalTrimmed(u8, i8),
     Float32,
     Float64,
     Fixed(u8),
@@ -28,6 +29,10 @@ impl Kind {
                 FIXED_SCALE_KEY.to_owned(),
                 scale.to_string(),
             )])),
+            Kind::DecimalTrimmed(..) => field.with_metadata(HashMap::from([(
+                TRIMMED_DECIMAL_KEY.to_owned(),
+                "true".to_owned(),
+            )])),
             _ => field,
         }
     }
@@ -37,7 +42,9 @@ impl Kind {
             Kind::Int => DataType::Int64,
             Kind::Int32 => DataType::Int32,
             Kind::Decimal => DataType::Decimal128(15, 2),
-            Kind::Decimal128(precision, scale) => DataType::Decimal128(precision, scale),
+            Kind::Decimal128(precision, scale) | Kind::DecimalTrimmed(precision, scale) => {
+                DataType::Decimal128(precision, scale)
+            }
             Kind::Float32 => DataType::Float32,
             Kind::Float64 | Kind::Fixed(_) => DataType::Float64,
             Kind::Bool => DataType::Boolean,
@@ -56,6 +63,7 @@ impl Kind {
 pub(crate) use Kind::*;
 
 pub(crate) const FIXED_SCALE_KEY: &str = "benchbox.fixed_scale";
+pub(crate) const TRIMMED_DECIMAL_KEY: &str = "benchbox.trimmed_decimal";
 
 pub(crate) type Column = (&'static str, Kind, bool);
 
