@@ -6,7 +6,7 @@ const GROUP_ORDER: u64 = MODULUS - 1;
 const ORDER_FACTORS: [(u64, u32); 7] =
     [(2, 1), (3, 2), (7, 1), (11, 1), (31, 1), (151, 1), (331, 1)];
 const DENSE_LIMIT: u64 = 1 << 24;
-const LAZY_MIN_MODULUS: u64 = 1 << 16;
+const LAZY_MIN_MODULUS: u64 = 1 << 12;
 
 fn mul_mod(left: u64, right: u64) -> u64 {
     (left * right) % MODULUS
@@ -213,6 +213,14 @@ fn draw_after(pass: &Pass, steps: u64) -> u64 {
     mul_mod(pass.start, pow_mod(MULTIPLIER, steps))
 }
 
+fn last_step(exponent: u64, limit: u64, period: u64) -> Option<u64> {
+    let first = if exponent == 0 { period } else { exponent };
+    if limit < first {
+        return None;
+    }
+    Some(first + (limit - first) / period * period - 1)
+}
+
 fn trace_pass(pass: &Pass, size: u64, modulus: u64, mut position: u64) -> u64 {
     let mut limit = size;
     loop {
@@ -230,13 +238,10 @@ fn trace_pass(pass: &Pass, size: u64, modulus: u64, mut position: u64) -> u64 {
                 while candidate < MODULUS {
                     if candidate != 0
                         && let Some(exponent) = discrete_log(mul_mod(candidate, pass.inverse_start))
-                        && exponent >= 1
-                        && exponent <= limit
+                        && let Some(step) = last_step(exponent, limit, GROUP_ORDER)
+                        && event.is_none_or(|found| step > found)
                     {
-                        let step = exponent - 1;
-                        if event.is_none_or(|found| step > found) {
-                            event = Some(step);
-                        }
+                        event = Some(step);
                     }
                     candidate += modulus;
                 }
@@ -315,6 +320,62 @@ mod tests {
                     lazy.entry(index),
                     Some(u64::from(dense[index as usize])),
                     "seed {seed} modulus {modulus} index {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_last_step_covers_every_repeat_of_the_period() {
+        for period in [1_u64, 2, 5, 7] {
+            for exponent in 0..period {
+                for limit in 0..40_u64 {
+                    let expected = (0..limit)
+                        .rev()
+                        .find(|step| (step + 1) % period == exponent);
+                    assert_eq!(
+                        last_step(exponent, limit, period),
+                        expected,
+                        "{exponent} {limit} {period}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "walks 2^31 draws backwards; run with --release -- --ignored"]
+    fn a_lazy_trace_above_the_generator_period_equals_the_backward_walk() {
+        let size = GROUP_ORDER + 1_000;
+        let modulus = key_modulus(size).unwrap();
+        for seed in [1_u64, 1_339_962_585] {
+            let mut rng = Rng::new(seed);
+            let mut lazy = KeyPermutation::Lazy {
+                size,
+                modulus,
+                passes: Vec::new(),
+            };
+            lazy.shuffle(&mut rng);
+            let indices = [0_u64, 1, 5, 999, 1_000, size / 2, GROUP_ORDER - 1, size - 1];
+            let mut positions = indices;
+            let inverse = pow_mod(MULTIPLIER, MODULUS - 2);
+            let mut draw = mul_mod(seed, pow_mod(MULTIPLIER, size));
+            for step in (0..size).rev() {
+                let partner = draw % modulus;
+                for position in &mut positions {
+                    if *position == step {
+                        *position = partner;
+                    } else if *position == partner {
+                        *position = step;
+                    }
+                }
+                draw = mul_mod(draw, inverse);
+            }
+            for (index, expected) in indices.iter().zip(positions) {
+                assert_eq!(
+                    lazy.entry(*index),
+                    Some(expected),
+                    "seed {seed} index {index}"
                 );
             }
         }

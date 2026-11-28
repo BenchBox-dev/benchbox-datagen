@@ -538,3 +538,13 @@ fn wrapped_draws_do_not_depend_on_the_stream_position() {
         }
     }
 }
+
+#[test]
+fn q9_generates_where_the_key_count_truncates_to_a_small_modulus() {
+    let Some(root) = checkout() else { return };
+    let inputs = Inputs::load(&root);
+    for scale in [89_478.0, 89_479.0] {
+        let (text, params, _) = inputs.single("9", Some(1), scale, None, None).unwrap();
+        assert!(!text.is_empty() && !params.is_empty(), "sf {scale}");
+    }
+}
