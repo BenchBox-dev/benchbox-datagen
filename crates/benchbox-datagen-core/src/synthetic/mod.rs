@@ -2,6 +2,8 @@ pub(crate) mod calendar;
 pub(crate) mod delimited;
 pub(crate) mod rng;
 mod ssb;
+#[cfg(test)]
+mod wide_fixture;
 
 use std::fmt;
 use std::io::{self, Write};
@@ -23,13 +25,21 @@ pub(crate) trait Table: Send + Sync + fmt::Debug {
     fn rows(&self) -> u64;
     fn block(&self, index: u64) -> RecordBatch;
 
+    fn block_rows(&self) -> u64 {
+        BLOCK_ROWS
+    }
+
     fn warm(&self, _block: u64, _cancel: &AtomicBool) -> bool {
         true
     }
 }
 
 pub(crate) fn block_len(rows: u64, block: u64) -> usize {
-    (rows - block * BLOCK_ROWS).min(BLOCK_ROWS) as usize
+    block_len_in(rows, block, BLOCK_ROWS)
+}
+
+pub(crate) fn block_len_in(rows: u64, block: u64, block_rows: u64) -> usize {
+    (rows - block * block_rows).min(block_rows) as usize
 }
 
 pub(crate) trait Generator: Sync {
@@ -66,6 +76,8 @@ pub(crate) trait Generator: Sync {
 #[rustfmt::skip]
 const REGISTRY: &[&dyn Generator] = &[
     &ssb::Ssb,
+    #[cfg(test)]
+    &wide_fixture::WideFixture,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,9 +121,10 @@ impl Iterator for Part {
         if self.next >= self.end {
             return None;
         }
-        let block = self.next / BLOCK_ROWS;
-        let start = block * BLOCK_ROWS;
-        let stop = (start + BLOCK_ROWS).min(self.end);
+        let block_rows = self.table.block_rows();
+        let block = self.next / block_rows;
+        let start = block * block_rows;
+        let stop = (start + block_rows).min(self.end);
         let batch = self.table.block(block);
         let slice = batch.slice((self.next - start) as usize, (stop - self.next) as usize);
         self.next = stop;
@@ -183,6 +196,12 @@ mod tests {
             assert!(!generator.tables().is_empty());
             for scale_factor in [0.01, 1.0] {
                 for table in generator.tables() {
+                    assert!(
+                        generator
+                            .open(table, scale_factor, DEFAULT_SEED)
+                            .block_rows()
+                            > 0
+                    );
                     let schema = generator.schema(table).expect("every table has a schema");
                     let source = generator.open(table, scale_factor, DEFAULT_SEED);
                     assert_eq!(source.schema(), schema);

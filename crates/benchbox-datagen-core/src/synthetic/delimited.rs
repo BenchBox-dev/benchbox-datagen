@@ -196,13 +196,19 @@ fn push_decimal(out: &mut Vec<u8>, value: i128, scale: usize) {
 }
 
 fn push_trimmed_decimal(out: &mut Vec<u8>, scratch: &mut Scratch, value: i128, scale: usize) {
-    let mut text = Vec::with_capacity(48);
-    push_decimal(&mut text, value, scale);
-    let text = std::str::from_utf8(&text).expect("decimal text is ASCII");
-    let parsed = text
-        .parse::<f64>()
-        .expect("decimal text is a float literal");
-    push_float64(out, scratch, parsed);
+    let mut itoa = itoa::Buffer::new();
+    let digits = itoa.format(value.unsigned_abs()).as_bytes();
+    let exponent = if value == 0 {
+        0
+    } else {
+        digits.len() as i32 - 1 - scale as i32
+    };
+    scratch.digits.clear();
+    scratch.digits.extend_from_slice(digits);
+    while scratch.digits.len() > 1 && scratch.digits.last() == Some(&b'0') {
+        scratch.digits.pop();
+    }
+    push_digits(out, value < 0, &scratch.digits, exponent);
 }
 
 fn push_non_finite(out: &mut Vec<u8>, value: f64) -> bool {
@@ -248,7 +254,10 @@ fn push_repr(out: &mut Vec<u8>, scratch: &mut Scratch, shortest: std::fmt::Argum
         .write_fmt(shortest)
         .expect("writing to a String cannot fail");
     let (negative, exponent) = split_scientific(&scratch.text, &mut scratch.digits);
-    let digits = &scratch.digits;
+    push_digits(out, negative, &scratch.digits, exponent);
+}
+
+fn push_digits(out: &mut Vec<u8>, negative: bool, digits: &[u8], exponent: i32) {
     if negative {
         out.push(b'-');
     }
@@ -753,13 +762,16 @@ mod tests {
 
     #[test]
     fn trimmed_decimals_match_python_float_repr() {
-        let cases: [(i128, i8, &str); 14] = [
+        let cases: [(i128, i8, &str); 17] = [
+            (-12_345_678_901_234_567, 16, "-1.2345678901234567"),
+            (9_007_199_254_740_993, 0, "9007199254740993.0"),
+            (-92_233_720_368_547_758, 17, "-0.92233720368547758"),
             (0, 2, "0.0"),
             (250, 2, "2.5"),
             (-5, 2, "-0.05"),
             (100, 2, "1.0"),
             (-73_912_345_000_000, 14, "-0.73912345"),
-            (-7_391_234_512_345_678, 14, "-73.91234512345677"),
+            (-7_391_234_512_345_678, 14, "-73.91234512345678"),
             (1, 5, "1e-05"),
             (-1, 5, "-1e-05"),
             (10, 5, "0.0001"),

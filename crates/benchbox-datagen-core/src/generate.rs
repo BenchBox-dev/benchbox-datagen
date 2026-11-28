@@ -147,11 +147,10 @@ pub(crate) fn synthetic_plan(
 ) -> Vec<Slice> {
     let source = generator.open(table, scale_factor, seed);
     let total = source.rows();
-    let step = chunk_rows
-        .map_or(synthetic::BLOCK_ROWS, |rows| {
-            rows.max(1).div_ceil(synthetic::BLOCK_ROWS) * synthetic::BLOCK_ROWS
-        })
-        .max(1);
+    let block_rows = source.block_rows();
+    let step = chunk_rows.map_or(block_rows, |rows| {
+        rows.max(1).div_ceil(block_rows) * block_rows
+    });
     (0..total.div_ceil(step).max(1))
         .map(|index| Slice::Synthetic {
             table: source.clone(),
@@ -164,7 +163,7 @@ pub(crate) fn synthetic_plan(
 pub(crate) fn warm(slice: &Slice, cancel: &AtomicBool) -> Result<(), Error> {
     match slice {
         Slice::Synthetic { table, rows, .. } if rows.start < rows.end => {
-            if table.warm(rows.start / synthetic::BLOCK_ROWS, cancel) {
+            if table.warm(rows.start / table.block_rows(), cancel) {
                 Ok(())
             } else {
                 Err(Error::Cancelled)

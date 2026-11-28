@@ -259,6 +259,24 @@ one Python config file and one schema file; nothing else is edited.
    legacy files are not `|`-separated `.tbl` overrides `text_format` (see Text
    output above).
 
+   **Block size.** Rows are generated in blocks of `Table::block_rows()` rows
+   (default `synthetic::BLOCK_ROWS` = 65,536). A block is generated whole, and
+   the pipeline holds up to about `2 x threads` blocks in flight, so peak memory
+   is roughly that many blocks. Leave the default for narrow rows. For wide rows
+   (amplab documents about 2.5 KB per row, vector_search 128 floats per row)
+   override `fn block_rows(&self) -> u64` on the `Table` so one block is about
+   16 MiB of Arrow data: `16 MiB / bytes per row`, for example 6,500 rows at
+   2.5 KB or 32,768 rows at 512 B. Inside `block(index)` use
+   `block_len_in(self.rows(), index, self.block_rows())` for the row count and
+   `index * self.block_rows()` for the first row; `block_len` and `BLOCK_ROWS`
+   are the default-size forms. Part slicing, the header (first part only),
+   `warm` and the single-file chunking all follow the declared size. Parquet row
+   groups stay at 122,880 rows whatever the block size, so a Parquet writer
+   still buffers one row group of wide rows. The block size is part of the
+   output only through what `block(index)` derives from the index (for example
+   per-block random streams), so changing it on an existing table changes its
+   data unless the table derives values from the row number.
+
    **Row counts and key ranges are closed-form functions of the scale
    factor, not of the seed**: `row_count`, `key_ranges` and `table_scales` take
    no seed, and a part is a row range of a fixed-size table. A table whose
@@ -285,16 +303,35 @@ one Python config file and one schema file; nothing else is edited.
    `tools/bench_budgets.py`, and the exclusions. Config files are discovered by
    file name, so no list needs editing. Every exclusion (column, whole table or
    data-dependent) needs a written reason; a blank reason raises.
+   `budget_class` (`"tpch"` or `"tpcds"`, default none) judges the benchmark
+   against that class's wall-time and RSS budgets from the ADR table instead of
+   its own `budgets` (give one or the other; `budgets` is optional with a class): `tpch_skew` is TPC-H data with skew, so it uses the TPC-H
+   budgets; every other synthetic generator keeps the synthetic budget.
+   `stats_memory_limit` (default `"2GB"`) is the DuckDB memory limit of the
+   legacy statistics run; statistics are computed in batches of 4 columns, so
+   raise it only for very large tables.
 5. **Evidence.** Run, for each scale in the config, `tools/synthetic_acceptance.py
    <name> legacy`, `library` (the same seeds), `compare` (add `*_queries`
    files for seeds 47-71 when legacy leaves a query empty) and `verify`, then
    `report`, and put the report in the PR. Required results, unchanged from
    SSB: every metric inside the legacy min-max or the 99.9% prediction
-   interval of 5 legacy seeds (boundary quantiles of low-cardinality columns
-   may pass by rank); queries never empty in legacy never empty in the
+   interval of 5 legacy seeds, or, when it fails that on any library seed, not
+   significantly different (two-sided Mann-Whitney U, normal approximation with
+   tie correction, p >= 0.001) between the 30 legacy and 30 library values of
+   seeds 42-71 (run `legacy` and `library` for seeds 42-71 and pass them as
+   `compare --legacy-extended` and `--library-extended`; a missing seed stops
+   with an error, and the report lists every re-judged metric with both
+   30-value summaries and the p-value) (boundary quantiles of low-cardinality columns
+   may pass by rank; a statistic that is identical in all 5 legacy seeds must
+   be identical in the library when it is integer-valued, and equal within a
+   relative 1e-9 otherwise, as is every constant mean, because summation order
+   alone moves a float mean by about 1e-12 and that is numeric noise, not a
+   distribution difference); queries never empty in legacy never empty in the
    library, otherwise 30 seeds per side with one-sided Fisher p >= 0.001; no
-   orphan or duplicate keys; every query returns the same rows in DuckDB and
-   DataFusion; wall-time and peak-RSS budgets met. Also run
+   orphan or duplicate keys (a NULL foreign key is not an orphan, so a
+   nullable foreign key can be declared); every query returns the same row
+   count in DuckDB and DataFusion (value differences are reported as warnings,
+   and NaN on both engines agrees); wall-time and peak-RSS budgets met. Also run
    `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
    `pytest tests` and `python3 tools/third_party_licenses.py --check`.
 6. **Docs.** Add a section for the benchmark to this README next to SSB
