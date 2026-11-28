@@ -241,6 +241,54 @@ are a data-dependent subset of the matching sales range, so no exact bounds exis
 without generating the returns rows; the bounds of the sales range would be only a
 superset, and are left out so that every reported range is exact.
 
+### TPC-H skew
+
+`tpch_skew` is the TPC-H stream of this library with the skew pass of BenchBox's
+`TPCHSkewDataGenerator` applied while the rows are produced (no intermediate files).
+Tables, columns, types, delimiter (`|`, `.tbl`, no header) and row counts are those of
+`tpch`; every table has the TPC-H row count at every scale factor, and
+`key_ranges` and `table_scales` equal the `tpch` values. The pass implements the legacy
+default, the `moderate` preset (`skew_factor` 0.5, Zipfian, attribute and join skew on,
+temporal skew off), which is what `TPCHSkewBenchmark()` uses without arguments. The
+other presets (`none`, `light`, `heavy`, `extreme`, `realistic`) and custom
+`SkewConfiguration` objects are not available through the library (the generator takes
+only a scale factor and a seed).
+
+| Table | Column | Replacement (legacy `_generate_skewed_values`) |
+| :--- | :--- | :--- |
+| `customer` | `c_nationkey` | Zipf, exponent 1.0, over 0-24 |
+| `customer` | `c_mktsegment` | Zipf, exponent 0.8, over the 5 segments |
+| `part` | `p_brand` | Zipf, exponent 1.0, over `Brand#11`-`Brand#55` |
+| `part` | `p_type` | Zipf, exponent 0.6, over the legacy list of 20 types |
+| `orders` | `o_custkey` | Zipf, exponent 1.0, over `1..int(150,000 * SF)` |
+| `orders` | `o_orderpriority` | Zipf, exponent 0.6, over the 5 priorities |
+| `lineitem` | `l_partkey` | Zipf, exponent 1.0, over `1..int(200,000 * SF)` |
+| `lineitem` | `l_suppkey` | Zipf, exponent 0.8, over `1..int(10,000 * SF)` |
+| `lineitem` | `l_shipmode` | Zipf, exponent 0.8, over the 7 ship modes |
+
+The Zipf exponent is twice the attribute's skew value, as in the legacy code. Rank `k`
+(0-based) maps to the value `floor((k / N) * N + first)` in IEEE double arithmetic, the
+legacy mapping including its rounding, and a rank beyond the table is clamped to the last
+one. Every other column, and `nation`, `region`, `supplier` and `partsupp`, are the `tpch`
+stream unchanged (the four unchanged tables are byte-identical to `tpch` output).
+
+Each skewed column draws from its own block stream (`tpch_skew`, table, column name, seed,
+block); the replaced column of block `b` does not depend on any other block. The TPC-H rows
+under a block come from `tpcgen-rs` chunks of about 2,048 driver rows (orders for
+`lineitem`, parts for `partsupp`) that cover the block, so a block regenerates at most a
+chunk on each side; `lineitem` chunk offsets come from one pass over the order line counts
+(the same RNG that gives the exact `lineitem` row count). The Zipf cumulative tables are
+built with a logarithm and exponential computed from IEEE addition, multiplication and
+division only (exponent 1.0 needs none), so no platform libm is involved.
+
+`tools/synthetic_acceptance.py tpch_skew ...` (config in
+`tools/synthetic_configs/tpch_skew.py`) compares against the legacy generator run with
+`SkewPreset.MODERATE` and seeds 42-46. The 22 TPC-H queries use BenchBox's default
+`qgen` texts at SF 1 (the config has no scale-dependent text, so Q11's fraction does
+not vary by scale). The legacy generator's TPC-H base data is `tpch`, so base columns
+need no exclusion. The tests in `crates/benchbox-datagen-core/tests/tpch_skew.rs` freeze
+the golden hashes.
+
 ## Adding a synthetic generator
 
 A synthetic generator is one Rust module plus one registry entry (one line),

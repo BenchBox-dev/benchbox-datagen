@@ -2,6 +2,7 @@ pub(crate) mod calendar;
 pub(crate) mod delimited;
 pub(crate) mod rng;
 mod ssb;
+mod tpch_skew;
 #[cfg(test)]
 mod wide_fixture;
 
@@ -76,6 +77,7 @@ pub(crate) trait Generator: Sync {
 #[rustfmt::skip]
 const REGISTRY: &[&dyn Generator] = &[
     &ssb::Ssb,
+    &tpch_skew::TpchSkew,
     #[cfg(test)]
     &wide_fixture::WideFixture,
 ];
