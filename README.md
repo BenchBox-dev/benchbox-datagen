@@ -147,6 +147,7 @@ the output and is a generator version bump that refreezes the golden hashes.
   | `timestamp[us]` | `YYYY-MM-DD HH:MM:SS`, plus `.ffffff` only when the microseconds are not zero (Python `str(datetime)`) | `strftime("%Y-%m-%d %H:%M:%S")` in `h2odb`, `tsbs_devops`, `clickbench` |
   | `float`, `double` | shortest round-trip digits in Python `repr` layout (`0.1`, `1.0`, `1e-05`, `1e+16`, `nan`, `inf`) | `h2odb` and `amplab` write Python floats through `csv`/`str` |
   | fixed-scale `double` (`Kind::Fixed(n)`; the scale travels as the field metadata `benchbox.fixed_scale`, so a table cannot forget it) | `n` decimals (`1.50`), ties to even (`0.125` is `0.12`) | `tsbs_devops` metrics and `coffeeshop` prices use `f"{x:.2f}"` |
+  | trimmed `decimal128(p, s)` (`Kind::DecimalTrimmed(p, s)`; field metadata `benchbox.trimmed_decimal`) | Python `repr(float(x))`: trailing zeros dropped, at least one decimal (`2.5`, `1.0`, `-0.05`), exponent form below `1e-4` (`1e-05`) and from `1e16` | legacy `h2odb` lon/lat and `amplab` `adRevenue` decimals written as Python floats |
   | `decimal128(p, s)` | exactly `s` decimals, `-0.05`, no exponent | TPC-H style `dbgen` decimals; `h2odb`, `coffeeshop`, `amplab` declare `DECIMAL` columns |
   | `bool` | `true` / `false` | no legacy generator among the eight writes one; the form every target engine accepts |
   | `fixed_size_list<float>[n]` | `[v1,v2,...]`, each element `%.6g` | `vector_search._array_to_csv` (`f"{v:.6g}"` joined by `,`) |
