@@ -1,4 +1,5 @@
 pub(crate) mod calendar;
+mod coffeeshop;
 pub(crate) mod delimited;
 pub(crate) mod rng;
 mod ssb;
@@ -66,6 +67,7 @@ pub(crate) trait Generator: Sync {
 #[rustfmt::skip]
 const REGISTRY: &[&dyn Generator] = &[
     &ssb::Ssb,
+    &coffeeshop::Coffeeshop,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

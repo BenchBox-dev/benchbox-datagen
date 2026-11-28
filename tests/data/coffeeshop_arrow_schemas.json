@@ -1,0 +1,35 @@
+{
+ "dim_locations": [
+  ["record_id", "int64", true],
+  ["location_id", "string", true],
+  ["city", "string", true],
+  ["state", "string", true],
+  ["country", "string", true],
+  ["region", "string", true]
+ ],
+ "dim_products": [
+  ["record_id", "int64", true],
+  ["product_id", "int64", true],
+  ["name", "string", true],
+  ["category", "string", true],
+  ["subcategory", "string", true],
+  ["standard_cost", "decimal128(8, 2)", true],
+  ["standard_price", "decimal128(8, 2)", true],
+  ["from_date", "date32[day]", true],
+  ["to_date", "date32[day]", true]
+ ],
+ "order_lines": [
+  ["order_id", "int64", true],
+  ["line_number", "int64", true],
+  ["location_record_id", "int64", true],
+  ["location_id", "string", true],
+  ["product_record_id", "int64", true],
+  ["product_id", "int64", true],
+  ["order_date", "date32[day]", true],
+  ["order_time", "string", true],
+  ["quantity", "int64", true],
+  ["unit_price", "decimal128(8, 2)", true],
+  ["total_price", "decimal128(10, 2)", true],
+  ["region", "string", true]
+ ]
+}
