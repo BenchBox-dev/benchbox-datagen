@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import sys
 from decimal import Decimal
@@ -146,3 +147,55 @@ def test_seed_counts_are_fixed():
     assert SEEDS == [42, 43, 44, 45, 46]
     assert EXTENDED_SEEDS == list(range(42, 72))
     assert EXTENDED_SEEDS[: len(SEEDS)] == SEEDS
+
+
+def test_legacy_nullstr_distinguishes_empty_strings_from_nulls(fixture):
+    config, legacy_dir, _ = fixture
+    (legacy_dir / "t.csv").write_text("id,s\n1,\"\"\n2,__NULL__\n3,x\n")
+    schema = dataclasses.replace(config, schema_path=legacy_dir / "s.json")
+    (legacy_dir / "s.json").write_text(json.dumps({"t": [["id", "int64", False], ["s", "string", True]]}))
+    acceptance.CONFIG = schema
+    con = duckdb.connect()
+    default = con.sql(f"select s from {acceptance.legacy_sources(legacy_dir)['t']} order by id").fetchall()
+    assert default == [(None,), ("__NULL__",), ("x",)]
+    acceptance.CONFIG = dataclasses.replace(schema, legacy_nullstr="__NULL__")
+    source = acceptance.legacy_sources(legacy_dir)["t"]
+    assert "nullstr='__NULL__'" in source
+    assert con.sql(f"select s from {source} order by id").fetchall() == [("",), (None,), ("x",)]
+
+
+def test_value_comparison_tolerates_engine_arithmetic_types():
+    assert acceptance.values_match(47.517606900000004, Decimal("47.517606"))
+    assert acceptance.values_match(Decimal("46.38"), 46.38)
+    assert acceptance.values_match(0.0, 1e-10)
+    assert not acceptance.values_match(1, 2)
+    assert not acceptance.values_match("a", "b")
+    duck = [(2, 46.38), (1, 47.517606900000004)]
+    other = [(1, Decimal("47.517606")), (2, Decimal("46.38"))]
+    assert acceptance.first_difference(duck, other) is None
+    assert acceptance.first_difference(duck, [(1, Decimal("47.6")), (2, Decimal("46.38"))]) == {
+        "row": 0,
+        "column": 1,
+        "duckdb": "47.517606900000004",
+        "datafusion": "Decimal('47.6')",
+    }
+    assert acceptance.first_difference(duck, other[:1])["row"] is None
+
+
+def test_row_count_is_the_gate_and_values_are_reported_separately(fixture):
+    pytest.importorskip("datafusion")
+    config, _, library_dir = fixture
+    pq.write_table(
+        pa.table({"id": pa.array([1, 2, 3], pa.int64()), "price": pa.array([Decimal("46.38"), Decimal("47.52"), Decimal("48.99")], pa.decimal128(15, 2))}),
+        library_dir / "t.parquet",
+    )
+    queries = {
+        "avg": "SELECT avg(price) FROM t",
+        "median": "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price) FROM t",
+        "rows": "SELECT id FROM t",
+    }
+    acceptance.CONFIG = dataclasses.replace(config, queries=lambda: queries)
+    outcomes = acceptance.run_queries(library_dir)
+    assert all(outcome["agree"] for outcome in outcomes.values())
+    assert all(outcome["values_agree"] for outcome in outcomes.values())
+    assert outcomes["rows"]["first_difference"] is None
