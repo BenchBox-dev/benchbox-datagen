@@ -97,8 +97,8 @@ def test_table_exclusions_cover_every_column_of_the_table_with_the_reason():
 
 def test_a_budget_class_must_name_an_adr_class():
     with pytest.raises(ValueError, match="budget_class"):
-        rebuilt(budget_class="nonsense")
-    assert rebuilt(budget_class="tpch").budget_class == "tpch"
+        rebuilt(budget_class="nonsense", budgets={})
+    assert rebuilt(budget_class="tpch", budgets={}).budget_class == "tpch"
 
 
 def test_a_budget_class_config_is_judged_against_the_class_budget(monkeypatch):
