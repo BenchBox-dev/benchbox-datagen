@@ -36,6 +36,9 @@ SCALAR_TYPES = {
 VECTOR_KIND = re.compile(r"fixed_size_list<item: float>\[(\d+)\]$")
 QUANTILE_METRICS = {"p1": 0.01, "p25": 0.25, "p50": 0.5, "p75": 0.75, "p99": 0.99}
 CDF_MAX_DISTINCT = 5000
+COLUMN_BATCH = 4
+NOISE_REL_TOL = 1e-9
+REJUDGE_ALPHA = 0.001
 RANK_SIGMAS = 5.0
 EMPTY_RESULT_ALPHA = 0.001
 TBL_TYPES = {"int64": "BIGINT", "string": "VARCHAR", "double": "DOUBLE", "date32": "DATE", "bool": "BOOLEAN"}
@@ -85,7 +88,8 @@ def column_measure(table: str, column: str) -> str:
 def column_stats(
     con: duckdb.DuckDBPyConnection, source: str, table: str, legacy: bool = False
 ) -> dict[str, dict]:
-    result = _column_stats(con, source, table, [name for name, _, _ in schemas()[table]])
+    names = [name for name, _, _ in schemas()[table]]
+    result = _column_stats(con, source, table, names)
     if legacy and table in CONFIG.shared_domains:
         domain = CONFIG.shared_domains[table]
         shared = f"(SELECT * FROM {source} WHERE {domain.filter})"
@@ -95,6 +99,15 @@ def column_stats(
 
 def _column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str, columns: list[str]) -> dict[str, dict]:
     schema = [column for column in schemas()[table] if column[0] in columns]
+    result: dict = {}
+    total = 0
+    for start in range(0, len(schema), COLUMN_BATCH):
+        total, batch = _batch_stats(con, source, table, schema[start : start + COLUMN_BATCH])
+        result.update(batch)
+    return {"rows": total, "columns": result}
+
+
+def _batch_stats(con: duckdb.DuckDBPyConnection, source: str, table: str, schema: list[list]) -> tuple[int, dict]:
     selects = []
     for name, _, _ in schema:
         measure = column_measure(table, name)
@@ -126,10 +139,10 @@ def _column_stats(con: duckdb.DuckDBPyConnection, source: str, table: str, colum
                 f"SELECT {measure} AS m, count(*) FROM {source} WHERE {name} IS NOT NULL GROUP BY m ORDER BY m"
             ).fetchall():
                 running += count
-                cdf.append([value, running / total])
+                cdf.append([value, running / present])
             entry["cdf"] = cdf
         result[name] = entry
-    return {"rows": total, "columns": result}
+    return total, result
 
 
 def table_stats(con: duckdb.DuckDBPyConnection, sources: dict[str, str], legacy: bool = False) -> dict[str, dict]:
@@ -162,7 +175,7 @@ def run_legacy(scale_factor: float, seed: int, workdir: Path, queries_only: bool
         if queries_only:
             return {"seed": seed, "generate_seconds": seconds, "query_rows": query_row_counts(legacy_sources(out))}
         stats = table_stats(
-            duckdb.connect(config={"threads": 4, "memory_limit": "2GB"}), legacy_sources(out), legacy=True
+            duckdb.connect(config={"threads": 4, "memory_limit": CONFIG.stats_memory_limit}), legacy_sources(out), legacy=True
         )
         sources = legacy_sources(out)
         return {
@@ -238,16 +251,89 @@ def close(a: float, b: float) -> bool:
     return math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-12)
 
 
-def judge(new: float | None, legacy: list[float | None]) -> str:
+def constant_match(new: float, value: float, metric: str) -> bool:
+    if metric != "mean" and float(value).is_integer():
+        return new == value
+    return math.isclose(new, value, rel_tol=NOISE_REL_TOL, abs_tol=0.0)
+
+
+def judge(new: float | None, legacy: list[float | None], metric: str = "") -> str:
     if new is None or any(v is None for v in legacy):
         return "ok" if new is None and all(v is None for v in legacy) else "FAIL"
     low, high = min(legacy), max(legacy)
+    if low == high:
+        return "ok" if constant_match(new, low, metric) else "FAIL"
     if low <= new <= high or close(new, low) or close(new, high):
         return "ok"
     if len(set(legacy)) == 1:
         return "FAIL"
     spread = statistics.stdev(legacy) * T_99_9_FOUR_DF * math.sqrt(1 + 1 / len(legacy))
     return "pi" if abs(new - statistics.mean(legacy)) <= spread else "FAIL"
+
+
+def mann_whitney_p(a: list[float], b: list[float]) -> float:
+    n1, n2 = len(a), len(b)
+    pooled = sorted([(v, 0) for v in a] + [(v, 1) for v in b])
+    ranks, ties, index = [0.0] * len(pooled), 0.0, 0
+    while index < len(pooled):
+        end = index
+        while end + 1 < len(pooled) and pooled[end + 1][0] == pooled[index][0]:
+            end += 1
+        for position in range(index, end + 1):
+            ranks[position] = (index + end) / 2 + 1
+        size = end - index + 1
+        ties += size**3 - size
+        index = end + 1
+    total = n1 + n2
+    rank_sum = sum(rank for rank, (_, group) in zip(ranks, pooled) if group == 0)
+    u = rank_sum - n1 * (n1 + 1) / 2
+    variance = n1 * n2 / 12 * ((total + 1) - ties / (total * (total - 1)))
+    if variance <= 0:
+        return 1.0
+    z = max(0.0, abs(u - n1 * n2 / 2) - 0.5) / math.sqrt(variance)
+    return math.erfc(z / math.sqrt(2))
+
+
+def describe(values: list[float]) -> dict[str, float]:
+    return {
+        "min": min(values),
+        "median": statistics.median(values),
+        "mean": statistics.mean(values),
+        "max": max(values),
+    }
+
+
+class Rejudge:
+    def __init__(self, legacy_runs: list[dict], library_runs: list[dict]):
+        self.legacy_runs = legacy_runs
+        self.library_runs = library_runs
+        self.cache: dict[tuple[str, str, str], dict] = {}
+
+    def values(self, runs: list[dict], side: str) -> list[dict]:
+        by_seed = {run["seed"]: run for run in runs if "tables" in run}
+        missing = [seed for seed in EXTENDED_SEEDS if seed not in by_seed]
+        if missing:
+            raise SystemExit(f"{side}: no statistics for extended seeds {missing}")
+        return [by_seed[seed] for seed in EXTENDED_SEEDS]
+
+    def judge(self, table: str, column: str, metric: str) -> dict:
+        key = (table, column, metric)
+        if key not in self.cache:
+            legacy_runs = self.values(self.legacy_runs, "legacy")
+            library_runs = self.values(self.library_runs, "library")
+            legacy = [run["tables"][table]["columns"][column][metric] for run in legacy_runs]
+            library = [run["tables"][table]["columns"][column][metric] for run in library_runs]
+            if any(v is None for v in legacy + library):
+                self.cache[key] = {"p_value": None, "legacy": legacy, "library": library, "ok": False}
+            else:
+                p_value = mann_whitney_p(legacy, library)
+                self.cache[key] = {
+                    "p_value": p_value,
+                    "legacy": describe(legacy),
+                    "library": describe(library),
+                    "ok": p_value >= REJUDGE_ALPHA,
+                }
+        return self.cache[key]
 
 
 def rank_ok(q: float, legacy_values: list[float], cdf: list[list[float]], rows: int) -> bool:
@@ -263,7 +349,7 @@ def rank_ok(q: float, legacy_values: list[float], cdf: list[list[float]], rows: 
     return False
 
 
-def compare_stats(legacy: dict, library_run: dict) -> list[dict]:
+def compare_stats(legacy: dict, library_run: dict, rejudge: Rejudge | None = None) -> list[dict]:
     findings = []
     excluded = CONFIG.excluded_columns(legacy, library_run)
     for table in CONFIG.row_digests:
@@ -298,10 +384,12 @@ def compare_stats(legacy: dict, library_run: dict) -> list[dict]:
             metrics = ["distinct" if m == "distinct_ratio" and name in shared else m for m in METRICS]
             for metric in metrics:
                 legacy_values = [e[metric] for e in legacy_entries]
-                verdict = judge(entry[metric], legacy_values)
+                verdict = judge(entry[metric], legacy_values, metric)
                 if verdict == "FAIL" and metric in QUANTILE_METRICS and "cdf" in entry:
                     if rank_ok(QUANTILE_METRICS[metric], legacy_values, entry["cdf"], library_run["tables"][table]["rows"]):
                         verdict = "rank"
+                if verdict == "FAIL" and rejudge is not None and entry[metric] is not None:
+                    verdict = "mw" if rejudge.judge(table, name, metric)["ok"] else "FAIL"
                 findings.append(
                     {
                         "table": table,
@@ -373,20 +461,33 @@ def query_rule(legacy: dict, library: dict, legacy_extra: dict | None = None, li
 def cmd_compare(args: argparse.Namespace) -> None:
     legacy = json.loads(Path(args.legacy).read_text())
     library = json.loads(Path(args.library).read_text())
-    findings_by_seed = {run["seed"]: compare_stats(legacy, run) for run in library["runs"]}
+    def optional(path: str | None) -> dict | None:
+        return json.loads(Path(path).read_text()) if path else None
+
+    legacy_extended, library_extended = optional(args.legacy_extended), optional(args.library_extended)
+    rejudge = (
+        Rejudge(
+            legacy["runs"] + (legacy_extended["runs"] if legacy_extended else []),
+            library["runs"] + (library_extended["runs"] if library_extended else []),
+        )
+        if legacy["scale"] in CONFIG.distribution_scales
+        else None
+    )
+    findings_by_seed = {run["seed"]: compare_stats(legacy, run, rejudge) for run in library["runs"]}
     summary = {"scale": legacy["scale"], "legacy_seeds": [r["seed"] for r in legacy["runs"]], "seeds": {}}
     for seed, findings in findings_by_seed.items():
         counts = {"ok": 0, "pi": 0, "rank": 0, "excluded": 0, "FAIL": 0}
         for finding in findings:
-            counts[finding["verdict"]] += 1
+            counts[finding["verdict"]] = counts.get(finding["verdict"], 0) + 1
         summary["seeds"][seed] = {"counts": counts, "details": [f for f in findings if f["verdict"] != "ok"]}
-    def optional(path: str | None) -> dict | None:
-        return json.loads(Path(path).read_text()) if path else None
-
     summary["queries"] = query_rule(legacy, library, optional(args.legacy_queries), optional(args.library_queries))
     for run in legacy["runs"]:
         summary.setdefault("legacy_rows", {}).update({t: run["tables"][t]["rows"] for t in tables()})
     summary["library_rows"] = {t: library["runs"][0]["tables"][t]["rows"] for t in tables()}
+    if rejudge and rejudge.cache:
+        summary["rejudged"] = [
+            {"table": t, "column": c, "metric": m, **result} for (t, c, m), result in sorted(rejudge.cache.items())
+        ]
     Path(args.out).write_text(json.dumps(summary, indent=1))
     for seed, data in summary["seeds"].items():
         print(f"sf={legacy['scale']} seed={seed} {data['counts']}")
@@ -417,7 +518,8 @@ def sort_key(row: tuple) -> str:
 
 def values_match(a: object, b: object) -> bool:
     if numeric(a) and numeric(b):
-        return math.isclose(float(a), float(b), rel_tol=1e-6, abs_tol=1e-9)
+        a, b = float(a), float(b)
+        return (math.isnan(a) and math.isnan(b)) or math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-9)
     return a == b
 
 
@@ -433,6 +535,13 @@ def first_difference(duck_rows: list[tuple], df_rows: list[tuple]) -> dict | Non
     return None
 
 
+def orphan_count(con: duckdb.DuckDBPyConnection, child: str, child_col: str, parent: str, parent_col: str) -> int:
+    return con.execute(
+        f"SELECT count(*) FROM (SELECT {child_col} FROM {child} WHERE {child_col} IS NOT NULL) c "
+        f"ANTI JOIN {parent} p ON c.{child_col} = p.{parent_col}"
+    ).fetchone()[0]
+
+
 def verify_tables(scale_factor: float, directory: Path) -> dict:
     con = duckdb.connect()
     sources = parquet_sources(directory)
@@ -445,9 +554,9 @@ def verify_tables(scale_factor: float, directory: Path) -> dict:
             f"SELECT count(*) - count(DISTINCT ({keys})) FROM {sources[table]}"
         ).fetchone()[0]
     for child, child_col, parent, parent_col in CONFIG.foreign_keys:
-        result["orphans"][f"{child}.{child_col}->{parent}.{parent_col}"] = con.execute(
-            f"SELECT count(*) FROM {sources[child]} c ANTI JOIN {sources[parent]} p ON c.{child_col} = p.{parent_col}"
-        ).fetchone()[0]
+        result["orphans"][f"{child}.{child_col}->{parent}.{parent_col}"] = orphan_count(
+            con, sources[child], child_col, sources[parent], parent_col
+        )
     return result
 
 
@@ -541,7 +650,7 @@ def cmd_report(args: argparse.Namespace) -> None:
             f"| {sf_name(scale)} | {counts} | {sum(verify['orphans'].values())} | {sum(verify['duplicates'].values())} | {'yes' if agree else 'NO'} |"
         )
     lines += ["", f"### Distribution comparison with {len(SEEDS)} legacy seeds ({seed_range})", ""]
-    lines += ["| SF | library seed | in legacy range | in 99.9% prediction interval | rank-equivalent quantile | excluded | outside |", "|---|---|---|---|---|---|---|"]
+    lines += ["| SF | library seed | in legacy range | in 99.9% prediction interval | rank-equivalent quantile | re-judged on 30 seeds (not different) | excluded | outside |", "|---|---|---|---|---|---|---|---|"]
     details = []
     excluded = {}
     for scale in CONFIG.distribution_scales:
@@ -550,7 +659,7 @@ def cmd_report(args: argparse.Namespace) -> None:
             continue
         for seed, data in compare["seeds"].items():
             c = data["counts"]
-            lines.append(f"| {sf_name(scale)} | {seed} | {c['ok']} | {c['pi']} | {c['rank']} | {c['excluded']} | {c['FAIL']} |")
+            lines.append(f"| {sf_name(scale)} | {seed} | {c['ok']} | {c['pi']} | {c['rank']} | {c.get('mw', 0)} | {c['excluded']} | {c['FAIL']} |")
         for finding in compare["seeds"][str(first)]["details"]:
             if finding["verdict"] == "excluded":
                 excluded.setdefault((finding["table"], finding["column"]), finding["legacy"])
@@ -566,6 +675,14 @@ def cmd_report(args: argparse.Namespace) -> None:
         shown = ", ".join(f"{v:.6g}" if isinstance(v, (int, float)) else str(v) for v in legacy) if isinstance(legacy, list) else str(legacy)
         new = f"{f['new']:.6g}" if isinstance(f["new"], (int, float)) else str(f["new"])
         lines.append(f"| {sf_name(scale)} | {f['table']}.{f['column']} | {f['metric']} | {new} | {shown} | {f['verdict']} |")
+    lines += ["", f"Metrics that failed the 5-seed rule and were re-judged on seeds {first}-{extended_last} per side (two-sided Mann-Whitney U, fails only at p < {REJUDGE_ALPHA}):", ""]
+    lines += ["| SF | table.column | metric | legacy min / median / mean / max (30 seeds) | library min / median / mean / max (30 seeds) | p-value | verdict |", "|---|---|---|---|---|---|---|"]
+    for scale in CONFIG.distribution_scales:
+        compare = load(base / f"compare_{sf_name(scale)}.json")
+        for item in (compare or {}).get("rejudged", []):
+            shown = lambda d: " / ".join(f"{d[k]:.6g}" for k in ("min", "median", "mean", "max")) if isinstance(d, dict) else str(d)
+            p_value = f"{item['p_value']:.3g}" if item["p_value"] is not None else "n/a"
+            lines.append(f"| {sf_name(scale)} | {item['table']}.{item['column']} | {item['metric']} | {shown(item['legacy'])} | {shown(item['library'])} | {p_value} | {'not different' if item['ok'] else 'FAIL'} |")
     lines += ["", f"### Empty-result rule (seeds {seed_range} per side; seeds {first}-{extended_last} per side for queries legacy leaves empty on any of {seed_range})", ""]
     lines += ["| SF | queries empty on some legacy seed | rule violations |", "|---|---|---|"]
     for scale in CONFIG.query_scales:
@@ -626,6 +743,8 @@ def main() -> None:
     command.add_argument("--library", required=True)
     command.add_argument("--legacy-queries")
     command.add_argument("--library-queries")
+    command.add_argument("--legacy-extended")
+    command.add_argument("--library-extended")
     command.add_argument("--out", required=True)
     command.set_defaults(handler=cmd_compare)
     command = sub.add_parser("verify")

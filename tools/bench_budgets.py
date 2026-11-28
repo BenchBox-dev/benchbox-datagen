@@ -23,9 +23,21 @@ BUDGETS = {
     ("tpcds", 10.0, "tbl"): (30.0, 2048),
     ("tpcds", 10.0, "parquet"): (40.0, 2048),
 }
-for name in synthetic_configs.names():
-    for (scale, fmt), budget in synthetic_configs.load(name).budgets.items():
-        BUDGETS[(name, scale, fmt)] = budget
+
+
+def register_synthetic_budgets() -> None:
+    for name in synthetic_configs.names():
+        config = synthetic_configs.load(name)
+        if config.budget_class:
+            for (kind, scale, fmt), budget in list(BUDGETS.items()):
+                if kind == config.budget_class:
+                    BUDGETS[(name, scale, fmt)] = budget
+        else:
+            for (scale, fmt), budget in config.budgets.items():
+                BUDGETS[(name, scale, fmt)] = budget
+
+
+register_synthetic_budgets()
 
 CHILD = """
 import json, resource, sys, time
