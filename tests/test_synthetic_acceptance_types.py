@@ -217,6 +217,12 @@ def test_a_rank_check_on_a_nullable_column_uses_the_non_null_distribution():
     assert not acceptance.rank_ok(0.9, [20.0], cdf, 1_000_000)
 
 
+def test_rank_tolerance_follows_the_non_null_count():
+    cdf = [[10.0, 0.5], [20.0, 1.0]]
+    assert not acceptance.rank_ok(0.5 - 0.004, [20.0], cdf, 10_000_000)
+    assert acceptance.rank_ok(0.5 - 0.004, [20.0], cdf, 1_000)
+
+
 def test_null_foreign_keys_are_not_orphans(tmp_path):
     con = duckdb.connect()
     con.execute("CREATE TABLE child AS SELECT * FROM (VALUES (1), (NULL), (9), (NULL)) t(parent_id)")

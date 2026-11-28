@@ -305,7 +305,7 @@ one Python config file and one schema file; nothing else is edited.
    data-dependent) needs a written reason; a blank reason raises.
    `budget_class` (`"tpch"` or `"tpcds"`, default none) judges the benchmark
    against that class's wall-time and RSS budgets from the ADR table instead of
-   its own `budgets`: `tpch_skew` is TPC-H data with skew, so it uses the TPC-H
+   its own `budgets` (give one or the other; `budgets` is optional with a class): `tpch_skew` is TPC-H data with skew, so it uses the TPC-H
    budgets; every other synthetic generator keeps the synthetic budget.
    `stats_memory_limit` (default `"2GB"`) is the DuckDB memory limit of the
    legacy statistics run; statistics are computed in batches of 4 columns, so

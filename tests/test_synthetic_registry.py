@@ -104,7 +104,7 @@ def test_a_budget_class_must_name_an_adr_class():
 def test_a_budget_class_config_is_judged_against_the_class_budget(monkeypatch):
     import bench_budgets
 
-    config = rebuilt(name="classed", budget_class="tpch", budgets={(1.0, "tbl"): (1.0, 1)})
+    config = rebuilt(name="classed", budget_class="tpch", budgets={})
     monkeypatch.setattr(bench_budgets.synthetic_configs, "names", lambda: ["classed"])
     monkeypatch.setattr(bench_budgets.synthetic_configs, "load", lambda name: config)
     bench_budgets.register_synthetic_budgets()
@@ -114,3 +114,8 @@ def test_a_budget_class_config_is_judged_against_the_class_budget(monkeypatch):
     finally:
         for key in [k for k in bench_budgets.BUDGETS if k[0] == "classed"]:
             del bench_budgets.BUDGETS[key]
+
+
+def test_budgets_and_a_budget_class_together_are_rejected():
+    with pytest.raises(ValueError, match="not both"):
+        rebuilt(budget_class="tpch", budgets={(1.0, "tbl"): (1.0, 1)})

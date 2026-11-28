@@ -336,8 +336,8 @@ class Rejudge:
         return self.cache[key]
 
 
-def rank_ok(q: float, legacy_values: list[float], cdf: list[list[float]], rows: int) -> bool:
-    tolerance = RANK_SIGMAS * math.sqrt(q * (1 - q) / rows)
+def rank_ok(q: float, legacy_values: list[float], cdf: list[list[float]], present: int) -> bool:
+    tolerance = RANK_SIGMAS * math.sqrt(q * (1 - q) / max(present, 1))
     for value in set(legacy_values):
         position = next((i for i, (v, _) in enumerate(cdf) if close(v, value)), None)
         if position is None:
@@ -386,7 +386,8 @@ def compare_stats(legacy: dict, library_run: dict, rejudge: Rejudge | None = Non
                 legacy_values = [e[metric] for e in legacy_entries]
                 verdict = judge(entry[metric], legacy_values, metric)
                 if verdict == "FAIL" and metric in QUANTILE_METRICS and "cdf" in entry:
-                    if rank_ok(QUANTILE_METRICS[metric], legacy_values, entry["cdf"], library_run["tables"][table]["rows"]):
+                    present = round(library_run["tables"][table]["rows"] * (1 - entry["null_rate"]))
+                    if rank_ok(QUANTILE_METRICS[metric], legacy_values, entry["cdf"], present):
                         verdict = "rank"
                 if verdict == "FAIL" and rejudge is not None and entry[metric] is not None:
                     verdict = "mw" if rejudge.judge(table, name, metric)["ok"] else "FAIL"
